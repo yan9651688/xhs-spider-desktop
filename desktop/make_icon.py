@@ -85,13 +85,20 @@ def make_ico(png: Image.Image):
 
 
 if __name__ == '__main__':
+    import sys
+
     os.makedirs(ASSETS, exist_ok=True)
     icon = make_png()
     icon.save(os.path.join(ASSETS, 'app.png'))
+    if sys.platform == 'darwin':
+        try:
+            make_icns(icon)
+            print('icns ok')
+        except Exception as exc:
+            print(f'icns skipped: {type(exc).__name__}')
     try:
-        make_icns(icon)
-        print('icns ok')
+        make_ico(icon)
+        print('ico ok')
     except Exception as exc:
-        print(f'icns 跳过（非 mac 或 iconutil 不可用）：{exc}')
-    make_ico(icon)
-    print('图标已生成到 assets/')
+        print(f'ico skipped: {type(exc).__name__}')
+    print('icons done -> assets/')

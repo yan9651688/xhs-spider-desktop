@@ -5,6 +5,9 @@ on:
   push:
     tags: ['v*']          # 或推送 v 开头的 tag 自动触发，并附 Release
 
+permissions:
+  contents: write         # 打 tag 时创建 Release 并上传安装包
+
 jobs:
   windows:
     runs-on: windows-latest
