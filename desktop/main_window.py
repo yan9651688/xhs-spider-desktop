@@ -140,30 +140,38 @@ class _LogBridge(QThread):
 
 
 class _RestoreAuthWorker(QThread):
-    ok = Signal(object, str)     # auth, nickname
+    ok = Signal(object, str, str)     # auth, nickname, cookie
     failed = Signal(str)
 
-    def __init__(self, cookie: str, parent=None):
+    def __init__(self, cookies: list, parent=None):
         super().__init__(parent)
-        self.cookie = cookie
+        self.cookies = list(cookies)
 
     def run(self):
-        try:
-            from apis.xhs_pc_apis import XHS_Apis
-            from xhs_utils.xhs_pc import XHSPcAuth
+        from apis.xhs_pc_apis import XHS_Apis
+        from xhs_utils.xhs_pc import XHSPcAuth
 
-            auth = XHSPcAuth.from_cookie(self.cookie)
-            nickname = ''
+        last_error = ''
+        for index, item in enumerate(self.cookies):
+            cookie = (item or {}).get('cookie', '')
+            if not cookie:
+                continue
             try:
-                success, _msg, res = XHS_Apis(auth).get_user_me()
-                if success and res:
-                    nickname = (res.get('data') or {}).get('nickname') or ''
-            except Exception:
-                pass
-            self.ok.emit(auth, nickname)
-        except Exception as exc:
-            logger.error(f'恢复小红书会话失败：{exc}')
-            self.failed.emit(str(exc))
+                auth = XHSPcAuth.from_cookie(cookie)
+                nickname = ''
+                try:
+                    success, _msg, res = XHS_Apis(auth).get_user_me()
+                    if success and res:
+                        nickname = (res.get('data') or {}).get('nickname') or ''
+                except Exception:
+                    pass
+                self.ok.emit(auth, nickname, cookie)
+                return
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(f'小红书账号 {index + 1} 会话无效，尝试下一个：{exc}')
+        logger.error(f'恢复小红书会话失败：{last_error or "账号池为空"}')
+        self.failed.emit(last_error or '账号池为空')
 
 
 class _CollectWorker(QThread):
@@ -886,7 +894,7 @@ class MainWindow(QMainWindow):
     def remove_account(self, index: int):
         paths.remove_xhs_cookie(index)
         self.append_log(f'已从账号池移除账号 {index + 1}')
-        self.render_xhs_accounts()
+        self.restore_xhs_session()
 
     # ---------- 小红书会话 ----------
 
@@ -894,28 +902,28 @@ class MainWindow(QMainWindow):
         cookies = paths.load_xhs_cookies()
         self.render_xhs_accounts()
         if not cookies:
+            self.auth = None
             self.set_xhs_state(False, '')
             return
         self.xhs_label.setText('小红书：检测中…')
-        self.restore_cookie = cookies[0].get('cookie', '')
-        self.restore_worker = _RestoreAuthWorker(self.restore_cookie, self)
+        self.restore_worker = _RestoreAuthWorker(cookies, self)
         self.restore_worker.ok.connect(self._on_auth_ready)
         self.restore_worker.failed.connect(self._on_auth_failed)
         self.restore_worker.start()
 
-    def _on_auth_ready(self, auth, nickname: str):
+    def _on_auth_ready(self, auth, nickname: str, cookie: str):
         self.auth = auth
         self.xhs_nickname = nickname
         if nickname:
-            paths.set_xhs_nickname(getattr(self, 'restore_cookie', ''), nickname)
+            paths.set_xhs_nickname(cookie, nickname)
             self.render_xhs_accounts()
         self.set_xhs_state(True, nickname)
-        self.append_log('小红书会话已恢复（Cookie 有效）')
+        self.append_log(f'小红书会话已恢复（{nickname or "Cookie 有效"}）')
 
     def _on_auth_failed(self, message: str):
         self.auth = None
         self.set_xhs_state(False, '')
-        self.append_log(f'首个小红书账号会话已失效，采集时将自动跳过（{message}）')
+        self.append_log(f'账号池中没有可用的小红书会话，请重新扫码（{message}）')
 
     def set_xhs_state(self, logged_in: bool, nickname: str):
         if logged_in:

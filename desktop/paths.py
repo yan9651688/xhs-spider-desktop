@@ -114,14 +114,17 @@ def _cookie_key(cookie: str) -> str:
 
 
 def load_xhs_cookies() -> list:
-    """Cookie 池：[{cookie, nickname}]；首次调用自动迁移旧的单 Cookie 文件。"""
-    data = _load_json(COOKIES_FILE, [])
-    if isinstance(data, list) and data:
-        return [dict(c) for c in data if isinstance(c, dict) and c.get('cookie')]
+    """Cookie 池：[{cookie, nickname}]；仅池文件不存在时迁移旧的单 Cookie 文件。"""
+    if COOKIES_FILE.exists():
+        data = _load_json(COOKIES_FILE, [])
+        if isinstance(data, list):
+            return [dict(c) for c in data if isinstance(c, dict) and c.get('cookie')]
+        return []
     legacy = load_xhs_cookie()
     if legacy:
         items = [{'cookie': legacy, 'nickname': ''}]
         save_xhs_cookies(items)
+        clear_xhs_cookie()
         return items
     return []
 

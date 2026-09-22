@@ -25,7 +25,7 @@ fi
   --add-data "xhs_utils/xhs_core/js:xhs_utils/xhs_core/js" \
   --add-data "node_modules:node_modules" \
   --collect-all curl_cffi \
-  "${EXTRA[@]}" \
+  ${EXTRA[@]+"${EXTRA[@]}"} \
   main.py
 
 # 生成 DMG 安装包
