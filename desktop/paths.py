@@ -17,6 +17,7 @@ DEFAULT_SERVER = 'https://yushu.yituohub.com'
 # AI 接口统一走平台网关，锁死不开放修改；模型在模型广场自选复制
 AI_BASE_FIXED = 'https://api.yituohub.com/v1'
 AI_PRICING_URL = 'https://api.yituohub.com/pricing'
+AI_MODEL_DEFAULT = 'deepseek-v4.1-flash'
 
 DEFAULT_CONFIG = {
     'server': DEFAULT_SERVER,
@@ -25,7 +26,7 @@ DEFAULT_CONFIG = {
     # AI 改写（OpenAI Responses API 兼容，接口地址固定走平台网关）
     'ai_base': AI_BASE_FIXED,
     'ai_key': '',
-    'ai_model': '',
+    'ai_model': AI_MODEL_DEFAULT,
     'ai_prompt': '',   # 空=使用 ai_client.DEFAULT_PROMPT 预设
 }
 

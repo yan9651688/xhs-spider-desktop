@@ -749,8 +749,8 @@ class MainWindow(QMainWindow):
         ai_form.addRow('API Key', self.ai_key_edit)
         model_row = QHBoxLayout()
         model_row.setSpacing(8)
-        self.ai_model_edit = QLineEdit(self.config.get('ai_model') or '')
-        self.ai_model_edit.setPlaceholderText('粘贴模型名称，如 gpt-4o-mini / deepseek-v3')
+        self.ai_model_edit = QLineEdit(self.config.get('ai_model') or paths.AI_MODEL_DEFAULT)
+        self.ai_model_edit.setPlaceholderText('粘贴模型名称，如 deepseek-v4.1-flash / gpt-4o-mini')
         pricing_btn = QPushButton('模型广场 ↗')
         pricing_btn.setObjectName('softBtn')
         pricing_btn.setCursor(Qt.PointingHandCursor)
@@ -790,7 +790,7 @@ class MainWindow(QMainWindow):
     def save_ai_config(self):
         self.config['ai_base'] = paths.AI_BASE_FIXED
         self.config['ai_key'] = self.ai_key_edit.text().strip()
-        self.config['ai_model'] = self.ai_model_edit.text().strip()
+        self.config['ai_model'] = self.ai_model_edit.text().strip() or paths.AI_MODEL_DEFAULT
         self.config['ai_prompt'] = self.ai_prompt_edit.toPlainText().strip()
         paths.save_config(self.config)
         self.ai_test_label.setText('已保存')

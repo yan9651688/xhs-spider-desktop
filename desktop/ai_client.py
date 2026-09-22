@@ -61,7 +61,7 @@ class AIClient:
     def __init__(self, base: str, api_key: str, model: str, prompt: str):
         self.base = (base or 'https://api.openai.com/v1').strip().rstrip('/')
         self.api_key = (api_key or '').strip()
-        self.model = (model or 'gpt-4o-mini').strip()
+        self.model = (model or 'deepseek-v4.1-flash').strip()
         self.prompt = (prompt or DEFAULT_PROMPT).strip()
 
     def rewrite(self, title: str, content: str, timeout: int = 60) -> tuple[str, str]:
