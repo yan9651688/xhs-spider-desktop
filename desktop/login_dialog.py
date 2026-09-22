@@ -44,8 +44,8 @@ class LoginDialog(QDialog):
         layout.addSpacing(6)
 
         form = QFormLayout()
-        self.server_edit = QLineEdit(config.get('server') or '')
-        self.server_edit.setPlaceholderText('例如 http://your-server.com  （xiao 部署地址）')
+        self.server_edit = QLineEdit(config.get('server') or paths.DEFAULT_SERVER)
+        self.server_edit.setPlaceholderText('已内置线上服务，无需修改')
         self.user_edit = QLineEdit(config.get('username') or '')
         self.pwd_edit = QLineEdit()
         self.pwd_edit.setEchoMode(QLineEdit.Password)

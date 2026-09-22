@@ -27,14 +27,16 @@ class AuthClient:
     def _request(self, method: str, path: str, **kwargs) -> dict:
         url = f'{self.base}{path}'
         try:
-            resp = requests.request(method, url, timeout=12, **kwargs)
+            resp = requests.request(method, url, timeout=12, allow_redirects=False, **kwargs)
         except requests.RequestException as exc:
-            raise AuthError(f'无法连接服务器（{self.base}），请检查网络或服务器地址') from exc
+            raise AuthError(f'无法连接服务器（{self.base}），请检查网络') from exc
+        if 300 <= resp.status_code < 400:
+            raise AuthError('服务端尚未部署小红书采集接口，请联系管理员升级服务端')
         try:
             data = resp.json()
         except ValueError as exc:
             raise AuthError(
-                f'服务器响应异常（HTTP {resp.status_code}），请确认服务器地址是否正确'
+                f'服务器响应异常（HTTP {resp.status_code}），请联系管理员检查服务端'
             ) from exc
         if not isinstance(data, dict) or data.get('code') != 0:
             code = data.get('code') if isinstance(data, dict) else None

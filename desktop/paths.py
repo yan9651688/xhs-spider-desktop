@@ -11,8 +11,11 @@ SESSION_FILE = APP_DIR / 'session.json'
 XHS_COOKIE_FILE = APP_DIR / 'xhs_cookie.txt'
 DEFAULT_OUTPUT_DIR = Path.home() / 'Documents' / 'XHS采集'
 
+# 线上服务内置地址：客户无需填写，登录框保留输入框仅供开发联调用
+DEFAULT_SERVER = 'https://yushu.yituohub.com'
+
 DEFAULT_CONFIG = {
-    'server': '',
+    'server': DEFAULT_SERVER,
     'username': '',
     'output_dir': str(DEFAULT_OUTPUT_DIR),
 }
@@ -41,6 +44,8 @@ def _save_json(path: Path, data) -> None:
 def load_config() -> dict:
     config = dict(DEFAULT_CONFIG)
     config.update(_load_json(CONFIG_FILE, {}) or {})
+    if not config.get('server'):
+        config['server'] = DEFAULT_SERVER
     return config
 
 
