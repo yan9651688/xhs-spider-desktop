@@ -28,6 +28,10 @@ class AIError(RuntimeError):
     pass
 
 
+class _EndpointUnsupported(Exception):
+    """网关不支持 /responses 端点，需降级 chat/completions。"""
+
+
 def parse_rewrite_json(text: str) -> dict:
     """从模型输出中稳健地解析 {"title","content"}；失败返回空 dict。"""
     if not text:
@@ -83,24 +87,42 @@ class AIClient:
         if not self.api_key:
             raise AIError('未配置 API Key')
         try:
-            resp = requests.post(
-                f'{self.base}/responses',
-                headers={
-                    'Authorization': f'Bearer {self.api_key}',
-                    'Content-Type': 'application/json',
-                },
-                json={
-                    'model': self.model,
-                    'instructions': instructions,
-                    'input': user_input,
-                    'temperature': 0.8,
-                },
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            raise AIError(f'AI 接口连接失败：{exc}') from exc
+            return self._call_responses(instructions, user_input, timeout)
+        except _EndpointUnsupported:
+            return self._call_chat(instructions, user_input, timeout)
+
+    def _headers(self) -> dict:
+        return {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+        }
+
+    def _check_common_error(self, resp) -> None:
         if resp.status_code in (401, 403):
             raise AIError('API Key 无效或无权限（HTTP %d）' % resp.status_code)
+        if resp.status_code >= 500:
+            raise AIError(
+                f'AI 网关故障（HTTP {resp.status_code}），请稍后再试；'
+                f'若持续出现请联系管理员检查网关渠道。详情：{resp.text[:120]}'
+            )
+
+    def _call_responses(self, instructions: str, user_input: str, timeout: int) -> str:
+        resp = requests.post(
+            f'{self.base}/responses',
+            headers=self._headers(),
+            json={
+                'model': self.model,
+                'instructions': instructions,
+                'input': user_input,
+                'temperature': 0.8,
+            },
+            timeout=timeout,
+        )
+        if resp.status_code in (404, 405, 501) or (
+                resp.status_code == 400 and
+                ('support' in resp.text.lower() or '不支持' in resp.text)):
+            raise _EndpointUnsupported()
+        self._check_common_error(resp)
         if resp.status_code != 200:
             raise AIError(f'AI 接口返回 HTTP {resp.status_code}：{resp.text[:200]}')
         try:
@@ -112,6 +134,37 @@ class AIClient:
             message = message.get('message') if isinstance(message, dict) else message
             raise AIError(f'AI 接口报错：{str(message)[:200]}')
         return _extract_text(data)
+
+    def _call_chat(self, instructions: str, user_input: str, timeout: int) -> str:
+        """网关不支持 /responses 时自动降级 chat/completions。"""
+        resp = requests.post(
+            f'{self.base}/chat/completions',
+            headers=self._headers(),
+            json={
+                'model': self.model,
+                'messages': [
+                    {'role': 'system', 'content': instructions},
+                    {'role': 'user', 'content': user_input},
+                ],
+                'temperature': 0.8,
+            },
+            timeout=timeout,
+        )
+        self._check_common_error(resp)
+        if resp.status_code != 200:
+            raise AIError(f'AI 接口返回 HTTP {resp.status_code}：{resp.text[:200]}')
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise AIError('AI 接口响应不是 JSON') from exc
+        if isinstance(data, dict) and data.get('error'):
+            message = data['error']
+            message = message.get('message') if isinstance(message, dict) else message
+            raise AIError(f'AI 接口报错：{str(message)[:200]}')
+        try:
+            return str(data['choices'][0]['message']['content'] or '')
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AIError('AI 接口响应缺少正文') from exc
 
     def rewrite_title(self, title: str, timeout: int = 60) -> str:
         """改写标题；返回改写文本，失败抛 AIError。"""
