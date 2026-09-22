@@ -1,3 +1,6 @@
+> **本分支（xhs-desktop）是桌面端改造版**：仅保留 PC 采集核心 + xiao 账号登录/有效期门禁的桌面软件。
+> 使用与部署说明见 [desktop/README.md](desktop/README.md)；原版全功能请看 master 分支。
+
 <div align="center">
 
 <p align="center">
