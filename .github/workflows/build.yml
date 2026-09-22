@@ -3,7 +3,7 @@ name: build
 on:
   workflow_dispatch:      # 手动触发：Actions 页面点 Run workflow
   push:
-    tags: ['v*']          # 或推送 v 开头的 tag 自动触发
+    tags: ['v*']          # 或推送 v 开头的 tag 自动触发，并附 Release
 
 jobs:
   windows:
@@ -26,9 +26,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force node_dist\bin
           Copy-Item (Get-Command node).Source node_dist\bin\node.exe
+          node_dist\bin\node.exe -v
       - name: 生成图标
         run: python desktop/make_icon.py
-      - name: 打包
+      - name: PyInstaller 打包
         run: >
           pyinstaller --noconfirm --clean --windowed --name XhsSpider
           --icon "assets/app.ico"
@@ -37,13 +38,21 @@ jobs:
           --add-data "node_modules;node_modules"
           --add-data "node_dist;node_dist"
           --collect-all curl_cffi main.py
-      - name: 压缩
-        shell: pwsh
-        run: Compress-Archive -Path 'dist/XhsSpider/*' -DestinationPath 'dist/XhsSpider-win64.zip' -Force
-      - uses: actions/upload-artifact@v4
+      - name: Inno Setup 安装包
+        shell: cmd
+        run: |
+          choco install innosetup -y --no-progress
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /DSourceDir=dist\XhsSpider /DOutputDir=dist desktop\xhsspider.iss
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
         with:
-          name: XhsSpider-win64
-          path: dist/XhsSpider-win64.zip
+          name: XhsSpider-Setup-win64
+          path: dist/XhsSpider-Setup-x64.exe
+      - name: 发布 Release（仅打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/XhsSpider-Setup-x64.exe
 
   macos:
     runs-on: macos-latest
@@ -64,7 +73,7 @@ jobs:
         run: |
           mkdir -p node_dist/bin
           cp "$(dirname "$(which node)")/node" node_dist/bin/node
-      - name: 打包
+      - name: 打包 DMG
         run: |
           python desktop/make_icon.py
           pyinstaller --noconfirm --clean --windowed --name XhsSpider \
@@ -74,8 +83,14 @@ jobs:
             --add-data "node_modules:node_modules" \
             --add-data "node_dist:node_dist" \
             --collect-all curl_cffi main.py
-          hdiutil create -ov -volname XhsSpider -srcfolder dist/XhsSpider.app -out dist/XhsSpider.dmg
-      - uses: actions/upload-artifact@v4
+          hdiutil create -ov -volname XhsSpider -srcfolder dist/XhsSpider.app dist/XhsSpider.dmg
+      - name: 上传 DMG
+        uses: actions/upload-artifact@v4
         with:
-          name: XhsSpider-macos
+          name: XhsSpider-macos-dmg
           path: dist/XhsSpider.dmg
+      - name: 发布 Release（仅打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/XhsSpider.dmg
