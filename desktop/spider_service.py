@@ -84,6 +84,8 @@ def collect_note_urls(api, spec: TaskSpec):
 
 
 RISK_KEYWORDS = ('461', '-629', '频繁', '风控', '验证码', '异常流量')
+RISK_COOLDOWN_SECONDS = 60
+RISK_MAX_CONSECUTIVE = 3
 
 
 def _throttle(delay: float, should_stop) -> None:
@@ -95,19 +97,54 @@ def _throttle(delay: float, should_stop) -> None:
         time.sleep(0.2)
 
 
-def run_collection(auth, spec: TaskSpec, should_stop, emit):
+def _spider_note(api, url: str):
+    """单篇抓取（复用 Data_Spider.spider_note 的逻辑，支持指定 api 实例做账号轮询）。"""
+    from xhs_utils.data_util import handle_note_info
+
+    try:
+        success, msg, data = api.get_note_info(url)
+        if success:
+            item = data['data']['items'][0]
+            item['url'] = url
+            return True, msg, handle_note_info(item)
+        return success, msg, None
+    except Exception as exc:
+        return False, exc, None
+
+
+def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
     """执行一次采集任务，返回摘要 dict。
 
+    cookies: 小红书 Cookie 列表，逐篇轮询使用（多账号分摊请求）。
     emit 需要提供：log(str) / note(dict) / progress(done, total, stage)
     should_stop() 返回 True 时在安全点中断。
     """
     from spider.spider import Data_Spider
     from xhs_utils.data_util import download_note, save_to_xlsx
+    from xhs_utils.xhs_pc import XHSPcAuth
+    from apis.xhs_pc_apis import XHS_Apis
 
     started = time.time()
-    spider = Data_Spider(auth)
-    api = spider.xhs_apis.bootstrap()
-    emit.log('已建立小红书会话，开始收集笔记链接…')
+
+    emit.log(f'正在建立 {len(cookies)} 个小红书账号会话…')
+    apis_list = []
+    for i, cookie in enumerate(cookies, start=1):
+        if should_stop():
+            return {'total': 0, 'got': 0, 'excel': '', 'zip': '', 'media_dir': '',
+                    'base_dir': '', 'seconds': 0, 'stopped': True}
+        try:
+            auth = XHSPcAuth.from_cookie(cookie)
+            apis_list.append(XHS_Apis(auth))
+            emit.log(f'小红书账号 {i} 会话有效')
+        except Exception as exc:
+            emit.log(f'小红书账号 {i} Cookie 已失效，跳过：{str(exc)[:60]}')
+        _throttle(1.0, should_stop)
+    if not apis_list:
+        raise RuntimeError('没有可用的小红书账号，请重新扫码登录')
+    emit.log(f'{len(apis_list)} 个账号参与轮询采集，分摊请求频率')
+
+    api = apis_list[0].bootstrap()
+    emit.log('开始收集笔记链接…')
 
     urls = collect_note_urls(api, spec)
     total = len(urls)
@@ -119,42 +156,69 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
         from desktop.ai_client import AIClient
         ai_client = AIClient(
             spec.ai_cfg.get('base') or '', spec.ai_cfg.get('key') or '',
-            spec.ai_cfg.get('model') or '', spec.ai_cfg.get('prompt') or '',
+            spec.ai_cfg.get('model') or '',
+            spec.ai_cfg.get('title_prompt') or '',
+            spec.ai_cfg.get('content_prompt') or '',
         )
-        emit.log(f"AI 改写已开启（模型：{ai_client.model}）")
+        emit.log(f"AI 改写已开启（模型：{ai_client.model}，标题/文案独立改写）")
     if spec.delay_seconds > 0:
         emit.log(f'防风控限速已开启：每篇间隔约 {spec.delay_seconds:g} 秒')
     else:
         emit.log('警告：未开启限速，高频采集容易触发小红书风控')
 
     note_list = []
+    consecutive_risk = 0
     for index, url in enumerate(urls, start=1):
         if should_stop():
             emit.log('任务已被用户停止')
             break
+        api_i = apis_list[(index - 1) % len(apis_list)]
         try:
-            success, msg, note_info = spider.spider_note(url)
+            success, msg, note_info = _spider_note(api_i, url)
         except Exception as exc:
             success, msg, note_info = False, exc, None
         if success and note_info:
+            consecutive_risk = 0
             if ai_client is not None:
+                title_done = content_done = False
                 try:
-                    new_title, new_content = ai_client.rewrite(
-                        note_info.get('title') or '', note_info.get('desc') or '',
-                    )
-                    note_info['title_ai'] = new_title
-                    note_info['desc_ai'] = new_content
-                    emit.log(f"AI 改写完成（{index}/{total}）：{new_title[:24]}")
+                    note_info['title_ai'] = ai_client.rewrite_title(
+                        note_info.get('title') or '')
+                    title_done = True
                 except Exception as exc:
-                    emit.log(f'AI 改写失败（{index}/{total}），保留原文：{exc}')
+                    emit.log(f'AI 标题改写失败（{index}/{total}），保留原文：{exc}')
+                try:
+                    note_info['desc_ai'] = ai_client.rewrite_content(
+                        note_info.get('desc') or '')
+                    content_done = True
+                except Exception as exc:
+                    emit.log(f'AI 文案改写失败（{index}/{total}），保留原文：{exc}')
+                if title_done or content_done:
+                    emit.log(
+                        f"AI 改写完成（{index}/{total}，"
+                        f"{'标题' if title_done else ''}{'+' if title_done and content_done else ''}"
+                        f"{'文案' if content_done else ''}）：{str(note_info.get('title_ai') or note_info.get('title'))[:24]}"
+                    )
             note_list.append(note_info)
             emit.note(note_info)
         else:
             detail = str(msg)
             emit.log(f'抓取失败（{index}/{total}）：{msg}')
             if any(k in detail for k in RISK_KEYWORDS):
-                emit.log('疑似触发风控限流：建议停止任务，等待 10-30 分钟，'
-                         '并调大采集间隔或减少数量后再试')
+                consecutive_risk += 1
+                if consecutive_risk >= RISK_MAX_CONSECUTIVE:
+                    emit.log(
+                        f'连续 {RISK_MAX_CONSECUTIVE} 次触发风控，任务已自动停止。'
+                        '建议等待 30 分钟、调大采集间隔或增加小红书账号后再试'
+                    )
+                    break
+                emit.log(
+                    f'疑似触发风控限流，冷却 {RISK_COOLDOWN_SECONDS} 秒减少调用后继续'
+                    f'（连续第 {consecutive_risk} 次，累计 {RISK_MAX_CONSECUTIVE} 次自动停止）'
+                )
+                _throttle(RISK_COOLDOWN_SECONDS, should_stop)
+            else:
+                consecutive_risk = 0
         emit.progress(index, total, '抓取')
         if index < total:
             _throttle(spec.delay_seconds, should_stop)

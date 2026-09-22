@@ -173,9 +173,9 @@ class _CollectWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, auth, spec: TaskSpec, parent=None):
+    def __init__(self, cookies: list, spec: TaskSpec, parent=None):
         super().__init__(parent)
-        self.auth = auth
+        self.cookies = cookies
         self.spec = spec
         self._stop = False
 
@@ -185,7 +185,7 @@ class _CollectWorker(QThread):
     def run(self):
         emit = self._Emit(self)
         try:
-            summary = run_collection(self.auth, self.spec, lambda: self._stop, emit)
+            summary = run_collection(self.cookies, self.spec, lambda: self._stop, emit)
             self.done.emit(summary)
         except Exception as exc:
             logger.exception('采集任务异常')
@@ -293,7 +293,8 @@ class MainWindow(QMainWindow):
         # Logo
         logo_row = QHBoxLayout()
         logo_tile = QLabel()
-        logo_tile.setPixmap(gradient_tile('红', ['#ff8a5c', '#6c5ce7', '#4ec9d4']))
+        logo_tile.setPixmap(gradient_tile('YC', ['#ff8a5c', '#6c5ce7', '#4ec9d4'],
+                                          font_size=13))
         logo_tile.setFixedSize(34, 34)
         logo_tile.setAlignment(Qt.AlignCenter)
         logo_text_box = QVBoxLayout()
@@ -343,12 +344,12 @@ class MainWindow(QMainWindow):
         add_nav(NAV_SETTINGS, '设置', 'gear')
 
         layout.addSpacing(14)
-        section = QLabel('账号')
+        section = QLabel('小红书账号池')
         section.setObjectName('navSection')
         layout.addWidget(section)
 
         add_row = QHBoxLayout()
-        add_btn = QPushButton('添加小红书账号')
+        add_btn = QPushButton('扫码添加账号')
         add_btn.setObjectName('navSubItem')
         add_btn.setIcon(line_icon('plus', '#6c5ce7'))
         add_btn.setCursor(Qt.PointingHandCursor)
@@ -356,12 +357,11 @@ class MainWindow(QMainWindow):
         add_row.addWidget(add_btn, 1)
         layout.addLayout(add_row)
 
-        self.xhs_item = QPushButton('小红书 · 未登录')
-        self.xhs_item.setObjectName('navSubItem')
-        self.xhs_item.setIcon(line_icon('user'))
-        self.xhs_item.setCursor(Qt.PointingHandCursor)
-        self.xhs_item.clicked.connect(self.open_xhs_login)
-        layout.addWidget(self.xhs_item)
+        self.xhs_accounts_box = QVBoxLayout()
+        self.xhs_accounts_box.setContentsMargins(0, 2, 0, 2)
+        self.xhs_accounts_box.setSpacing(2)
+        layout.addLayout(self.xhs_accounts_box)
+        self.render_xhs_accounts()
 
         layout.addStretch(1)
 
@@ -771,12 +771,18 @@ class MainWindow(QMainWindow):
         model_row.addWidget(self.ai_model_edit, 1)
         model_row.addWidget(pricing_btn)
         ai_form.addRow('模型', model_row)
-        self.ai_prompt_edit = QPlainTextEdit(self.config.get('ai_prompt') or '')
-        self.ai_prompt_edit.setPlaceholderText(
-            '留空使用内置预设提示词（改写标题 20 字内 + 正文 150-250 字 + 话题标签，输出 JSON）'
+        self.ai_title_prompt_edit = QPlainTextEdit(self.config.get('ai_title_prompt') or '')
+        self.ai_title_prompt_edit.setPlaceholderText(
+            '留空使用内置预设：小红书爆款标题写手，20字内，有网感，只输出标题本身'
         )
-        self.ai_prompt_edit.setFixedHeight(110)
-        ai_form.addRow('提示词', self.ai_prompt_edit)
+        self.ai_title_prompt_edit.setFixedHeight(76)
+        self.ai_content_prompt_edit = QPlainTextEdit(self.config.get('ai_content_prompt') or '')
+        self.ai_content_prompt_edit.setPlaceholderText(
+            '留空使用内置预设：小红书爆款文案写手，150-250字+话题标签，只输出正文本身'
+        )
+        self.ai_content_prompt_edit.setFixedHeight(96)
+        ai_form.addRow('标题提示词', self.ai_title_prompt_edit)
+        ai_form.addRow('文案提示词', self.ai_content_prompt_edit)
         ai_box.addLayout(ai_form)
         ai_btn_row = QHBoxLayout()
         save_btn = QPushButton('保存配置')
@@ -801,7 +807,8 @@ class MainWindow(QMainWindow):
         self.config['ai_base'] = paths.AI_BASE_FIXED
         self.config['ai_key'] = self.ai_key_edit.text().strip()
         self.config['ai_model'] = self.ai_model_edit.text().strip() or paths.AI_MODEL_DEFAULT
-        self.config['ai_prompt'] = self.ai_prompt_edit.toPlainText().strip()
+        self.config['ai_title_prompt'] = self.ai_title_prompt_edit.toPlainText().strip()
+        self.config['ai_content_prompt'] = self.ai_content_prompt_edit.toPlainText().strip()
         paths.save_config(self.config)
         self.ai_test_label.setText('已保存')
         self.append_log('AI 改写配置已保存')
@@ -813,7 +820,9 @@ class MainWindow(QMainWindow):
         from desktop.ai_client import AIClient
         client = AIClient(
             paths.AI_BASE_FIXED, self.config.get('ai_key') or '',
-            self.config.get('ai_model') or '', self.config.get('ai_prompt') or '',
+            self.config.get('ai_model') or '',
+            self.config.get('ai_title_prompt') or '',
+            self.config.get('ai_content_prompt') or '',
         )
         self._ai_test_worker = _AiTestWorker(client, self)
         self._ai_test_worker.ok.connect(self._on_ai_test_ok)
@@ -833,15 +842,63 @@ class MainWindow(QMainWindow):
             btn.setChecked(k == key)
         self.pages.setCurrentIndex(key)
 
+    # ---------- Cookie 池侧边栏 ----------
+
+    def render_xhs_accounts(self):
+        """按 Cookie 池重建侧边栏账号列表。"""
+        while self.xhs_accounts_box.count():
+            item = self.xhs_accounts_box.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        cookies = paths.load_xhs_cookies()
+        if not cookies:
+            empty = QLabel('暂无账号，请先扫码')
+            empty.setObjectName('mutedLabel')
+            empty.setContentsMargins(10, 2, 0, 2)
+            self.xhs_accounts_box.addWidget(empty)
+        for index, item in enumerate(cookies):
+            name = item.get('nickname') or f'账号{index + 1}'
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 3, 4, 3)
+            row_layout.setSpacing(6)
+            dot = QLabel()
+            dot.setObjectName('accountDot')
+            dot.setAttribute(Qt.WA_StyledBackground, True)
+            dot.setFixedSize(7, 7)
+            name_label = QLabel(name)
+            name_label.setObjectName('accountName')
+            del_btn = QPushButton('✕')
+            del_btn.setObjectName('ghostBtn')
+            del_btn.setFixedSize(20, 20)
+            del_btn.setCursor(Qt.PointingHandCursor)
+            del_btn.setToolTip('从账号池移除')
+            del_btn.clicked.connect(lambda _=False, i=index: self.remove_account(i))
+            row_layout.addWidget(dot)
+            row_layout.addWidget(name_label, 1)
+            row_layout.addWidget(del_btn)
+            self.xhs_accounts_box.addWidget(row)
+        if getattr(self, 'stat_xhs', None):
+            self.stat_xhs.setText(f'{len(cookies)} 个' if cookies else '未登录')
+
+    def remove_account(self, index: int):
+        paths.remove_xhs_cookie(index)
+        self.append_log(f'已从账号池移除账号 {index + 1}')
+        self.render_xhs_accounts()
+
     # ---------- 小红书会话 ----------
 
     def restore_xhs_session(self):
-        cookie = paths.load_xhs_cookie()
-        if not cookie:
+        cookies = paths.load_xhs_cookies()
+        self.render_xhs_accounts()
+        if not cookies:
             self.set_xhs_state(False, '')
             return
         self.xhs_label.setText('小红书：检测中…')
-        self.restore_worker = _RestoreAuthWorker(cookie, self)
+        self.restore_cookie = cookies[0].get('cookie', '')
+        self.restore_worker = _RestoreAuthWorker(self.restore_cookie, self)
         self.restore_worker.ok.connect(self._on_auth_ready)
         self.restore_worker.failed.connect(self._on_auth_failed)
         self.restore_worker.start()
@@ -849,14 +906,16 @@ class MainWindow(QMainWindow):
     def _on_auth_ready(self, auth, nickname: str):
         self.auth = auth
         self.xhs_nickname = nickname
+        if nickname:
+            paths.set_xhs_nickname(getattr(self, 'restore_cookie', ''), nickname)
+            self.render_xhs_accounts()
         self.set_xhs_state(True, nickname)
         self.append_log('小红书会话已恢复（Cookie 有效）')
 
     def _on_auth_failed(self, message: str):
         self.auth = None
-        paths.clear_xhs_cookie()
         self.set_xhs_state(False, '')
-        self.append_log(f'小红书会话已失效，请重新扫码登录（{message}）')
+        self.append_log(f'首个小红书账号会话已失效，采集时将自动跳过（{message}）')
 
     def set_xhs_state(self, logged_in: bool, nickname: str):
         if logged_in:
@@ -864,16 +923,10 @@ class MainWindow(QMainWindow):
             self.xhs_label.setText(f'小红书：{text}')
             self.xhs_label.setObjectName('xhsStateOk')
             self.xhs_login_btn.setText('切换账号')
-            self.stat_xhs.setText(text)
-            self.xhs_item.setText(f'小红书 · {text}')
-            self.xhs_item.setIcon(line_icon('user', '#2fbf8f'))
         else:
             self.xhs_label.setText('小红书：未登录')
             self.xhs_label.setObjectName('xhsStateBad')
             self.xhs_login_btn.setText('扫码登录小红书')
-            self.stat_xhs.setText('未登录')
-            self.xhs_item.setText('小红书 · 未登录')
-            self.xhs_item.setIcon(line_icon('user'))
         self._restyle(self.xhs_label)
         self.xhs_label.setStyleSheet('')
 
@@ -913,7 +966,8 @@ class MainWindow(QMainWindow):
                 'base': paths.AI_BASE_FIXED,
                 'key': self.config.get('ai_key') or '',
                 'model': self.config.get('ai_model') or '',
-                'prompt': self.config.get('ai_prompt') or '',
+                'title_prompt': self.config.get('ai_title_prompt') or '',
+                'content_prompt': self.config.get('ai_content_prompt') or '',
             }
         spec = TaskSpec(
             save_images=self.img_check.isChecked(),
@@ -948,8 +1002,10 @@ class MainWindow(QMainWindow):
         return spec
 
     def _validate_spec(self, spec: TaskSpec) -> str:
-        if self.auth is None:
+        if not paths.load_xhs_cookies():
             return '请先扫码登录小红书'
+        if self.auth is None:
+            return '小红书会话检测中，请稍候重试'
         if spec.mode == 'search' and not spec.query:
             return '请输入搜索关键词'
         if spec.mode == 'user' and not spec.user_url:
@@ -981,7 +1037,8 @@ class MainWindow(QMainWindow):
         self.run_btn.setText('停止')
         self.tabs.setEnabled(False)
 
-        self.collect_worker = _CollectWorker(self.auth, spec, self)
+        self.collect_worker = _CollectWorker(
+            [c.get('cookie', '') for c in paths.load_xhs_cookies()], spec, self)
         self.collect_worker.note.connect(self.add_note_row)
         self.collect_worker.progress.connect(self.on_progress)
         self.collect_worker.logline.connect(self.append_log)

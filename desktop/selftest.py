@@ -133,8 +133,11 @@ def test_auth_client():
 def test_gui():
     from PySide6.QtWidgets import QApplication, QTabWidget
 
+    from desktop import paths as dpaths
     from desktop.login_dialog import LoginDialog
     from desktop.main_window import MainWindow
+
+    dpaths.load_xhs_cookies = lambda: [{'cookie': 'web_session=selftest', 'nickname': '测试号'}]
 
     app = QApplication.instance() or QApplication([])
     login = LoginDialog({'server': 'http://demo', 'username': 'alice'})

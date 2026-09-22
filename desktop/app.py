@@ -172,6 +172,8 @@ QPushButton#navSubItem {
     font-size: 12px;
 }
 QPushButton#navSubItem:hover { background-color: #f5f4fc; color: #5b4bd0; }
+QLabel#accountDot { background-color: #2fbf8f; border-radius: 3px; }
+QLabel#accountName { font-size: 12px; color: #555b66; }
 QLabel#navSection {
     color: #9aa0a6;
     font-size: 11px;

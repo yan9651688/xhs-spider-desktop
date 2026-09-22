@@ -9,6 +9,7 @@ APP_DIR = Path.home() / '.xhs_spider'
 CONFIG_FILE = APP_DIR / 'config.json'
 SESSION_FILE = APP_DIR / 'session.json'
 XHS_COOKIE_FILE = APP_DIR / 'xhs_cookie.txt'
+COOKIES_FILE = APP_DIR / 'xhs_cookies.json'
 DEFAULT_OUTPUT_DIR = Path.home() / 'Documents' / 'XHS采集'
 
 # 线上服务内置地址：客户无需填写，登录框保留输入框仅供开发联调用
@@ -27,7 +28,8 @@ DEFAULT_CONFIG = {
     'ai_base': AI_BASE_FIXED,
     'ai_key': '',
     'ai_model': AI_MODEL_DEFAULT,
-    'ai_prompt': '',   # 空=使用 ai_client.DEFAULT_PROMPT 预设
+    'ai_title_prompt': '',    # 空=使用 ai_client.TITLE_PROMPT_PRESET 预设
+    'ai_content_prompt': '',  # 空=使用 ai_client.CONTENT_PROMPT_PRESET 预设
 }
 
 
@@ -98,3 +100,64 @@ def clear_xhs_cookie() -> None:
         XHS_COOKIE_FILE.unlink()
     except FileNotFoundError:
         pass
+
+
+# ---------- 多小红书账号 Cookie 池 ----------
+
+def _cookie_key(cookie: str) -> str:
+    """以 web_session 作为账号唯一标识。"""
+    for part in str(cookie or '').split(';'):
+        key, _, value = part.strip().partition('=')
+        if key == 'web_session':
+            return value
+    return str(cookie or '')[:64]
+
+
+def load_xhs_cookies() -> list:
+    """Cookie 池：[{cookie, nickname}]；首次调用自动迁移旧的单 Cookie 文件。"""
+    data = _load_json(COOKIES_FILE, [])
+    if isinstance(data, list) and data:
+        return [dict(c) for c in data if isinstance(c, dict) and c.get('cookie')]
+    legacy = load_xhs_cookie()
+    if legacy:
+        items = [{'cookie': legacy, 'nickname': ''}]
+        save_xhs_cookies(items)
+        return items
+    return []
+
+
+def save_xhs_cookies(items: list) -> None:
+    _save_json(COOKIES_FILE, [
+        {'cookie': c.get('cookie', ''), 'nickname': c.get('nickname', '')}
+        for c in items if isinstance(c, dict) and c.get('cookie')
+    ])
+
+
+def add_xhs_cookie(cookie: str, nickname: str = '') -> None:
+    items = load_xhs_cookies()
+    key = _cookie_key(cookie)
+    for item in items:
+        if _cookie_key(item.get('cookie', '')) == key:
+            if nickname:
+                item['nickname'] = nickname
+            save_xhs_cookies(items)
+            return
+    items.append({'cookie': cookie, 'nickname': nickname})
+    save_xhs_cookies(items)
+
+
+def set_xhs_nickname(cookie: str, nickname: str) -> None:
+    items = load_xhs_cookies()
+    key = _cookie_key(cookie)
+    for item in items:
+        if _cookie_key(item.get('cookie', '')) == key and nickname:
+            item['nickname'] = nickname
+            save_xhs_cookies(items)
+            return
+
+
+def remove_xhs_cookie(index: int) -> None:
+    items = load_xhs_cookies()
+    if 0 <= index < len(items):
+        items.pop(index)
+        save_xhs_cookies(items)

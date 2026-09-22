@@ -41,7 +41,7 @@ class QrLoginThread(QThread):
         try:
             cookie = auth.cookies
             if cookie:
-                paths.save_xhs_cookie(cookie)
+                paths.add_xhs_cookie(cookie)
         finally:
             try:
                 auth.close()

@@ -1,5 +1,8 @@
 # encoding: utf-8
-"""AI 改写客户端：OpenAI Responses API（/v1/responses）格式，兼容各类 OpenAI 兼容网关。"""
+"""AI 改写客户端：OpenAI Responses API（/v1/responses）格式，兼容各类 OpenAI 兼容网关。
+
+标题与文案各自独立提示词、独立调用，互不影响；单个失败保留该项原文。
+"""
 from __future__ import annotations
 
 import json
@@ -7,12 +10,17 @@ import re
 
 import requests
 
-DEFAULT_PROMPT = (
-    '你是小红书爆款文案专家。我会给你一篇笔记的原标题和原文，请改写成全新的小红书风格文案：\n'
-    '1. 标题：20字以内，有网感、带悬念或利益点，可加1-2个emoji；\n'
-    '2. 正文：150-250字，口语化、分段清晰、结尾带4个 #话题标签；\n'
-    '3. 保留原文核心信息与卖点，不得虚构事实。\n'
-    '只输出JSON，格式：{"title":"改写后的标题","content":"改写后的正文"}，不要输出任何其他内容。'
+TITLE_PROMPT_PRESET = (
+    '你是小红书爆款标题写手。基于给出的原标题，改写一个全新的小红书风格标题：'
+    '20字以内，有网感、带悬念或利益点，可加1-2个emoji，保留核心卖点，不虚构事实。'
+    '只输出改写后的标题文字本身，不要解释、不要引号、不要JSON。'
+)
+
+CONTENT_PROMPT_PRESET = (
+    '你是小红书爆款文案写手。基于给出的原文案，改写出全新的小红书风格正文：'
+    '150-250字，口语化、分段清晰（用换行分隔），结尾加4个#话题标签，'
+    '保留原文核心信息与卖点，不虚构事实。'
+    '只输出改写后的正文文字本身，不要解释、不要JSON。'
 )
 
 
@@ -57,15 +65,21 @@ def _extract_text(data: dict) -> str:
     return ''.join(chunks)
 
 
+def _clean_plain(text: str) -> str:
+    """清理模型输出的包裹符号。"""
+    return (text or '').strip().strip('"').strip('“”').strip()
+
+
 class AIClient:
-    def __init__(self, base: str, api_key: str, model: str, prompt: str):
+    def __init__(self, base: str, api_key: str, model: str,
+                 title_prompt: str = '', content_prompt: str = ''):
         self.base = (base or 'https://api.openai.com/v1').strip().rstrip('/')
         self.api_key = (api_key or '').strip()
         self.model = (model or 'deepseek-v4.1-flash').strip()
-        self.prompt = (prompt or DEFAULT_PROMPT).strip()
+        self.title_prompt = (title_prompt or '').strip() or TITLE_PROMPT_PRESET
+        self.content_prompt = (content_prompt or '').strip() or CONTENT_PROMPT_PRESET
 
-    def rewrite(self, title: str, content: str, timeout: int = 60) -> tuple[str, str]:
-        """改写标题与正文，返回 (new_title, new_content)；原样返回当失败。"""
+    def _call(self, instructions: str, user_input: str, timeout: int = 60) -> str:
         if not self.api_key:
             raise AIError('未配置 API Key')
         try:
@@ -77,8 +91,8 @@ class AIClient:
                 },
                 json={
                     'model': self.model,
-                    'instructions': self.prompt,
-                    'input': f'原标题：{title}\n原文：{content}',
+                    'instructions': instructions,
+                    'input': user_input,
                     'temperature': 0.8,
                 },
                 timeout=timeout,
@@ -97,16 +111,27 @@ class AIClient:
             message = data['error']
             message = message.get('message') if isinstance(message, dict) else message
             raise AIError(f'AI 接口报错：{str(message)[:200]}')
+        return _extract_text(data)
 
-        text = _extract_text(data)
-        parsed = parse_rewrite_json(text)
-        if not parsed:
-            raise AIError('AI 输出无法解析为 JSON')
-        new_title = str(parsed.get('title') or '').strip() or title
-        new_content = str(parsed.get('content') or '').strip() or content
-        return new_title, new_content
+    def rewrite_title(self, title: str, timeout: int = 60) -> str:
+        """改写标题；返回改写文本，失败抛 AIError。"""
+        text = self._call(self.title_prompt, f'原标题：{title}', timeout)
+        data = parse_rewrite_json(text)
+        result = _clean_plain(str(data.get('title') or '')) or _clean_plain(text)
+        if not result:
+            raise AIError('AI 标题输出为空')
+        return result
+
+    def rewrite_content(self, content: str, timeout: int = 60) -> str:
+        """改写正文；返回改写文本，失败抛 AIError。"""
+        text = self._call(self.content_prompt, f'原文案：{content}', timeout)
+        data = parse_rewrite_json(text)
+        result = _clean_plain(str(data.get('content') or '')) or _clean_plain(text)
+        if not result:
+            raise AIError('AI 文案输出为空')
+        return result
 
     def test(self) -> str:
-        """连通性测试，返回模型回复摘要。"""
-        title, content = self.rewrite('测试标题', '测试正文', timeout=30)
-        return (content or title)[:50]
+        """连通性测试：跑一次标题改写，返回模型输出摘要。"""
+        sample = self.rewrite_title('手工轻奢黄金小众耳环', timeout=30)
+        return sample[:30]
