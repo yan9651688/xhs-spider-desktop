@@ -112,6 +112,16 @@ def _spider_note(api, url: str):
         return False, exc, None
 
 
+def _should_collect(note_info: dict, spec: TaskSpec) -> bool:
+    """按保存选项过滤笔记类型：没勾视频=跳过视频笔记，没勾图片=跳过图文笔记。"""
+    is_video = note_info.get('note_type') == '视频'
+    if is_video and not spec.save_videos:
+        return False
+    if not is_video and not spec.save_images:
+        return False
+    return True
+
+
 def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
     """执行一次采集任务，返回摘要 dict。
 
@@ -167,10 +177,11 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
         emit.log('警告：未开启限速，高频采集容易触发小红书风控')
 
     note_list = []
+    skipped = 0
     consecutive_risk = 0
     for index, url in enumerate(urls, start=1):
         if should_stop():
-            emit.log('任务已被用户停止')
+            emit.log('任务已被用户停止，开始保存已采集的结果…')
             break
         api_i = apis_list[(index - 1) % len(apis_list)]
         try:
@@ -178,6 +189,12 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
         except Exception as exc:
             success, msg, note_info = False, exc, None
         if success and note_info:
+            if not _should_collect(note_info, spec):
+                skipped += 1
+                emit.progress(index, total, '抓取')
+                if index < total:
+                    _throttle(spec.delay_seconds, should_stop)
+                continue
             consecutive_risk = 0
             if ai_client is not None:
                 title_done = content_done = False
@@ -222,6 +239,11 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
         emit.progress(index, total, '抓取')
         if index < total:
             _throttle(spec.delay_seconds, should_stop)
+    if skipped:
+        emit.log(f'已按保存选项跳过 {skipped} 篇笔记（未勾选对应类型）')
+
+    # 停止 = 停止抓取新笔记；已抓到的结果必须完整导出，导出阶段不再响应停止
+    never_stop = lambda: False  # noqa: E731
 
     task_name = sanitize_name(spec.task_name)
     base_dir = os.path.join(spec.output_dir, task_name)
@@ -232,17 +254,21 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
 
     zip_path = ''
     if note_list and spec.zip_export:
-        from desktop.xhs_export import export_xiaolvsu_zip
-        zip_path = export_xiaolvsu_zip(
-            note_list, base_dir, spec.task_name, should_stop, emit,
-        ) or ''
+        zip_notes = [n for n in note_list if n.get('note_type') != '视频']
+        video_in_zip = len(note_list) - len(zip_notes)
+        if video_in_zip:
+            emit.log(f'打包跳过 {video_in_zip} 篇视频笔记（小绿书为图文格式，仅支持图文）')
+        if zip_notes:
+            from desktop.xhs_export import export_xiaolvsu_zip
+            zip_path = export_xiaolvsu_zip(
+                zip_notes, base_dir, spec.task_name, never_stop, emit,
+            ) or ''
+        else:
+            emit.log('勾选的笔记均为视频，无图文可打包')
 
     if note_list and spec.want_media:
         emit.progress(0, len(note_list), '保存媒体')
         for index, note_info in enumerate(note_list, start=1):
-            if should_stop():
-                emit.log('保存媒体被停止')
-                break
             try:
                 download_note(note_info, media_dir, spec.save_choice)
             except Exception as exc:

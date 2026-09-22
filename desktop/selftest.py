@@ -242,12 +242,33 @@ def test_ai_parse():
     check('解析失败返回空', data == {})
 
 
+# ---------- 6. 类型过滤 ----------
+
+def test_should_collect():
+    from desktop.spider_service import TaskSpec, _should_collect
+
+    both = TaskSpec(save_images=True, save_videos=True)
+    no_video = TaskSpec(save_images=True, save_videos=False)
+    no_image = TaskSpec(save_images=False, save_videos=True)
+
+    check('双选：图文/视频都采集',
+          _should_collect({'note_type': '图集'}, both)
+          and _should_collect({'note_type': '视频'}, both))
+    check('未勾视频：视频笔记被排除',
+          _should_collect({'note_type': '视频'}, no_video) is False)
+    check('未勾视频：图文笔记仍采集', _should_collect({'note_type': '图集'}, no_video))
+    check('未勾图片：图文笔记被排除',
+          _should_collect({'note_type': '图集'}, no_image) is False)
+    check('未勾图片：视频笔记仍采集', _should_collect({'note_type': '视频'}, no_image))
+
+
 if __name__ == '__main__':
     test_auth_client()
     test_gui()
     test_task_spec()
     test_xiaolvsu_zip()
     test_ai_parse()
+    test_should_collect()
     print()
     if FAILURES:
         print(f'自检失败 {len(FAILURES)} 项：{FAILURES}')
