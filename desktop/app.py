@@ -17,9 +17,14 @@ def ensure_node_runtime() -> bool:
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidates.append(os.path.join(exe_dir, 'node_dist', 'bin'))
+        candidates.append(os.path.join(exe_dir, 'node_dist'))
         meipass = getattr(sys, '_MEIPASS', None)
         if meipass:
             candidates.append(os.path.join(meipass, 'node_dist', 'bin'))
+    else:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates.append(os.path.join(root, 'node_dist', 'bin'))
+        candidates.append(os.path.join(root, 'node_dist'))
     candidates += [
         '/opt/homebrew/bin',
         '/usr/local/bin',

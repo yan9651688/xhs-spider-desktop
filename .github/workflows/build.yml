@@ -1,0 +1,81 @@
+name: build
+
+on:
+  workflow_dispatch:      # 手动触发：Actions 页面点 Run workflow
+  push:
+    tags: ['v*']          # 或推送 v 开头的 tag 自动触发
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r desktop/requirements.txt pyinstaller
+          npm install --no-fund --no-audit
+      - name: 自带 Node 运行时
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force node_dist\bin
+          Copy-Item (Get-Command node).Source node_dist\bin\node.exe
+      - name: 生成图标
+        run: python desktop/make_icon.py
+      - name: 打包
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name XhsSpider
+          --icon "assets/app.ico"
+          --add-data "xhs_utils/xhs_pc/js;xhs_utils/xhs_pc/js"
+          --add-data "xhs_utils/xhs_core/js;xhs_utils/xhs_core/js"
+          --add-data "node_modules;node_modules"
+          --add-data "node_dist;node_dist"
+          --collect-all curl_cffi main.py
+      - name: 压缩
+        shell: pwsh
+        run: Compress-Archive -Path 'dist/XhsSpider/*' -DestinationPath 'dist/XhsSpider-win64.zip' -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XhsSpider-win64
+          path: dist/XhsSpider-win64.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r desktop/requirements.txt pyinstaller
+          npm install --no-fund --no-audit
+      - name: 自带 Node 运行时
+        run: |
+          mkdir -p node_dist/bin
+          cp "$(dirname "$(which node)")/node" node_dist/bin/node
+      - name: 打包
+        run: |
+          python desktop/make_icon.py
+          pyinstaller --noconfirm --clean --windowed --name XhsSpider \
+            --icon "assets/app.icns" \
+            --add-data "xhs_utils/xhs_pc/js:xhs_utils/xhs_pc/js" \
+            --add-data "xhs_utils/xhs_core/js:xhs_utils/xhs_core/js" \
+            --add-data "node_modules:node_modules" \
+            --add-data "node_dist:node_dist" \
+            --collect-all curl_cffi main.py
+          hdiutil create -ov -volname XhsSpider -srcfolder dist/XhsSpider.app -out dist/XhsSpider.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XhsSpider-macos
+          path: dist/XhsSpider.dmg
