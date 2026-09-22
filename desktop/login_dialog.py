@@ -44,12 +44,10 @@ class LoginDialog(QDialog):
         layout.addSpacing(6)
 
         form = QFormLayout()
-        self.server_edit = QLineEdit(config.get('server') or paths.DEFAULT_SERVER)
-        self.server_edit.setPlaceholderText('已内置线上服务，无需修改')
         self.user_edit = QLineEdit(config.get('username') or '')
+        self.user_edit.setFocus()
         self.pwd_edit = QLineEdit()
         self.pwd_edit.setEchoMode(QLineEdit.Password)
-        form.addRow('服务器', self.server_edit)
         form.addRow('账号', self.user_edit)
         form.addRow('密码', self.pwd_edit)
         layout.addLayout(form)
@@ -69,12 +67,11 @@ class LoginDialog(QDialog):
         self.pwd_edit.returnPressed.connect(self.do_login)
 
     def do_login(self):
-        server = self.server_edit.text().strip()
+        # 服务器对客户不可见：内置线上地址；开发联调可用环境变量 XHS_SERVER 覆盖
+        import os
+        server = os.environ.get('XHS_SERVER') or paths.DEFAULT_SERVER
         username = self.user_edit.text().strip()
         password = self.pwd_edit.text()
-        if not (server.startswith('http://') or server.startswith('https://')):
-            self.status.setText('服务器地址需要以 http:// 或 https:// 开头')
-            return
         if not username or not password:
             self.status.setText('请输入账号和密码')
             return
