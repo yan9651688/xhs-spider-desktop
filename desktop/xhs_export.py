@@ -19,6 +19,24 @@ from PIL import Image
 from desktop.spider_service import sanitize_name
 
 IMAGE_TIMEOUT = 20
+_HEX = set('0123456789abcdefABCDEF')
+
+
+def id_prefix_24(note_id: str) -> str:
+    """取笔记 ID 的前 24 位十六进制作为文件夹 ID 前缀。
+
+    xiao 端（UserTrackService.extractTitleFromFolderName）固定剥离 24 位十六进制，
+    而小红书新笔记 ID 已出现 25 位，超出的尾位会污染标题，这里统一截齐。
+    """
+    run = ''
+    for ch in str(note_id or ''):
+        if ch in _HEX:
+            run += ch
+            if len(run) == 24:
+                break
+        else:
+            break
+    return run
 
 
 def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
@@ -39,9 +57,10 @@ def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
 
 def export_note_folder(note: dict, base_dir: str, should_stop=None,
                        progress=None) -> str | None:
-    """把一篇笔记导出为 {note_id}{标题}/ 文件夹，返回文件夹路径；无图返回 None。"""
+    """把一篇笔记导出为 {24位ID}{标题}/ 文件夹，返回文件夹路径；无图返回 None。"""
     title = note.get('title_ai') or note.get('title') or '无标题'
-    folder_name = f"{note.get('note_id', '')}{sanitize_name(title)}"[:120]
+    prefix = id_prefix_24(note.get('note_id', ''))
+    folder_name = f"{prefix}{sanitize_name(title).lstrip('_')}"[:120]
     folder = os.path.join(base_dir, folder_name)
     os.makedirs(folder, exist_ok=True)
 

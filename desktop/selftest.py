@@ -262,6 +262,21 @@ def test_should_collect():
     check('未勾图片：视频笔记仍采集', _should_collect({'note_type': '视频'}, no_image))
 
 
+# ---------- 4b. 25位ID对齐 xiao 24位剥离规则 ----------
+
+def test_id_prefix():
+    from desktop.xhs_export import id_prefix_24
+
+    check('24位ID原样保留',
+          id_prefix_24('683fe17f0000000023017c6a') == '683fe17f0000000023017c6a')
+    check('25位ID截齐为24位',
+          id_prefix_24('6a13b5420000000003803609f') == '6a13b5420000000003803609')
+    # 模拟 xiao extractTitleFromFolderName：剥24位后标题必须干净
+    folder = id_prefix_24('6a13b5420000000003803609f') + '甜？答案笑到打鸣'
+    extracted = folder[24:] if folder[:24].isalnum() else folder
+    check('xiao剥离后标题无脏字符', extracted == '甜？答案笑到打鸣', extracted)
+
+
 if __name__ == '__main__':
     test_auth_client()
     test_gui()
@@ -269,6 +284,7 @@ if __name__ == '__main__':
     test_xiaolvsu_zip()
     test_ai_parse()
     test_should_collect()
+    test_id_prefix()
     print()
     if FAILURES:
         print(f'自检失败 {len(FAILURES)} 项：{FAILURES}')
