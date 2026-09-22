@@ -14,14 +14,18 @@ DEFAULT_OUTPUT_DIR = Path.home() / 'Documents' / 'XHS采集'
 # 线上服务内置地址：客户无需填写，登录框保留输入框仅供开发联调用
 DEFAULT_SERVER = 'https://yushu.yituohub.com'
 
+# AI 接口统一走平台网关，锁死不开放修改；模型在模型广场自选复制
+AI_BASE_FIXED = 'https://api.yituohub.com/v1'
+AI_PRICING_URL = 'https://api.yituohub.com/pricing'
+
 DEFAULT_CONFIG = {
     'server': DEFAULT_SERVER,
     'username': '',
     'output_dir': str(DEFAULT_OUTPUT_DIR),
-    # AI 改写（OpenAI Responses API 兼容）
-    'ai_base': 'https://api.openai.com/v1',
+    # AI 改写（OpenAI Responses API 兼容，接口地址固定走平台网关）
+    'ai_base': AI_BASE_FIXED,
     'ai_key': '',
-    'ai_model': 'gpt-4o-mini',
+    'ai_model': '',
     'ai_prompt': '',   # 空=使用 ai_client.DEFAULT_PROMPT 预设
 }
 
