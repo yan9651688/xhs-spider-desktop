@@ -1,16 +1,18 @@
 # encoding: utf-8
-"""软件账号登录对话框：对接 xiao 的 /api/xhs/login。"""
+"""软件账号登录对话框：居中卡片式（YC 品牌色），对接 xiao 的 /api/xhs/login。"""
 from __future__ import annotations
+
+import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
+    QApplication,
     QDialog,
-    QFormLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from desktop import paths
@@ -22,53 +24,80 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle('登录 - 小红书采集工具')
         self.setModal(True)
-        self.setMinimumWidth(440)
+        self.setFixedWidth(400)
         self.session = None
         self.config = dict(config)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 20)
-        layout.setSpacing(14)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(36, 34, 36, 28)
+        root.setSpacing(0)
 
-        title_box = QVBoxLayout()
-        title_box.setSpacing(2)
+        # 品牌区：YC 渐变徽标 + 标题
+        from desktop.main_window import gradient_tile
+
+        logo = QLabel()
+        logo.setPixmap(gradient_tile('YC', ['#ff8a5c', '#6c5ce7', '#4ec9d4'],
+                                     size=58, radius=16, font_size=22))
+        logo.setAlignment(Qt.AlignCenter)
+        root.addWidget(logo)
+        root.addSpacing(16)
+
         title = QLabel('小红书采集工具')
         title.setObjectName('appTitle')
         title.setAlignment(Qt.AlignCenter)
-        subtitle = QLabel('账号登录')
+        root.addWidget(title)
+        subtitle = QLabel('请使用您的账号登录')
         subtitle.setObjectName('appSubTitle')
         subtitle.setAlignment(Qt.AlignCenter)
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        layout.addLayout(title_box)
-        layout.addSpacing(6)
+        root.addWidget(subtitle)
+        root.addSpacing(24)
 
-        form = QFormLayout()
-        self.user_edit = QLineEdit(config.get('username') or '')
-        self.user_edit.setFocus()
+        # 表单区：通栏输入框，无侧标签
+        self.user_edit = QLineEdit()
+        self.user_edit.setPlaceholderText('账号')
+        self.user_edit.setMinimumHeight(42)
+        self.user_edit.setText(config.get('username') or '')
+        root.addWidget(self.user_edit)
+        root.addSpacing(12)
+
         self.pwd_edit = QLineEdit()
+        self.pwd_edit.setPlaceholderText('密码')
         self.pwd_edit.setEchoMode(QLineEdit.Password)
-        form.addRow('账号', self.user_edit)
-        form.addRow('密码', self.pwd_edit)
-        layout.addLayout(form)
-
-        self.status = QLabel('')
-        self.status.setWordWrap(True)
-        self.status.setStyleSheet('color:#c62828;')
-        layout.addWidget(self.status)
+        self.pwd_edit.setMinimumHeight(42)
+        root.addWidget(self.pwd_edit)
+        root.addSpacing(20)
 
         self.login_btn = QPushButton('登 录')
         self.login_btn.setObjectName('primaryBtn')
-        self.login_btn.setMinimumHeight(36)
+        self.login_btn.setMinimumHeight(44)
+        self.login_btn.setCursor(Qt.PointingHandCursor)
         self.login_btn.setDefault(True)
         self.login_btn.clicked.connect(self.do_login)
-        layout.addWidget(self.login_btn)
+        root.addWidget(self.login_btn)
+        root.addSpacing(14)
 
+        self.status = QLabel(' ')
+        self.status.setWordWrap(True)
+        self.status.setAlignment(Qt.AlignCenter)
+        self.status.setStyleSheet('color:#c62828; font-size:12px; background:transparent;')
+        root.addWidget(self.status)
+        root.addStretch(1)
+
+        self.user_edit.setFocus()
         self.pwd_edit.returnPressed.connect(self.do_login)
+        self.user_edit.returnPressed.connect(self.pwd_edit.setFocus)
+
+    def showEvent(self, event):
+        """每次显示都在屏幕正中弹出。"""
+        super().showEvent(event)
+        self.adjustSize()
+        screen = self.screen() or QApplication.primaryScreen()
+        geometry = screen.availableGeometry()
+        self.move(geometry.center().x() - self.width() // 2,
+                  geometry.center().y() - self.height() // 2 - 20)
 
     def do_login(self):
         # 服务器对客户不可见：内置线上地址；开发联调可用环境变量 XHS_SERVER 覆盖
-        import os
         server = os.environ.get('XHS_SERVER') or paths.DEFAULT_SERVER
         username = self.user_edit.text().strip()
         password = self.pwd_edit.text()
@@ -77,18 +106,18 @@ class LoginDialog(QDialog):
             return
 
         self.login_btn.setEnabled(False)
-        self.status.setStyleSheet('color:#666;')
+        self.status.setStyleSheet('color:#9aa0a6; font-size:12px; background:transparent;')
         self.status.setText('正在登录…')
-        QApplication_processEvents()
+        QApplication.processEvents()
         try:
             session = AuthClient(server).login(username, password)
         except AuthError as exc:
-            self.status.setStyleSheet('color:#c62828;')
+            self.status.setStyleSheet('color:#c62828; font-size:12px; background:transparent;')
             self.status.setText(str(exc))
             self.login_btn.setEnabled(True)
             return
         except Exception as exc:  # 兜底，避免按钮卡死
-            self.status.setStyleSheet('color:#c62828;')
+            self.status.setStyleSheet('color:#c62828; font-size:12px; background:transparent;')
             self.status.setText(f'登录异常：{exc}')
             self.login_btn.setEnabled(True)
             return
@@ -99,8 +128,3 @@ class LoginDialog(QDialog):
         paths.save_session(session)
         self.session = session
         self.accept()
-
-
-def QApplication_processEvents():
-    from PySide6.QtWidgets import QApplication
-    QApplication.processEvents()
