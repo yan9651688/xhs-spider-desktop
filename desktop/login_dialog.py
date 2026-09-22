@@ -22,15 +22,26 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle('登录 - 小红书采集工具')
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
         self.session = None
         self.config = dict(config)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(14)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
         title = QLabel('小红书采集工具')
+        title.setObjectName('appTitle')
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet('font-size:18px; font-weight:600;')
-        layout.addWidget(title)
+        subtitle = QLabel('账号登录')
+        subtitle.setObjectName('appSubTitle')
+        subtitle.setAlignment(Qt.AlignCenter)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        layout.addLayout(title_box)
+        layout.addSpacing(6)
 
         form = QFormLayout()
         self.server_edit = QLineEdit(config.get('server') or '')
@@ -49,6 +60,8 @@ class LoginDialog(QDialog):
         layout.addWidget(self.status)
 
         self.login_btn = QPushButton('登 录')
+        self.login_btn.setObjectName('primaryBtn')
+        self.login_btn.setMinimumHeight(36)
         self.login_btn.setDefault(True)
         self.login_btn.clicked.connect(self.do_login)
         layout.addWidget(self.login_btn)

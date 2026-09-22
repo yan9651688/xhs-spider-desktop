@@ -1,5 +1,9 @@
 # encoding: utf-8
-"""主窗口：账号/有效期状态、小红书扫码、三种采集模式、日志与结果表。"""
+"""主窗口：Redwhale 风格（左侧导航 + 卡片式主区）。
+
+侧边栏：采集中心 / 账号矩阵(预留) / 设置 + 小红书账号区 + 底部用户卡。
+采集中心：问候头部、渐变统计卡、三种采集页签、保存选项、进度、结果表 + 日志。
+"""
 from __future__ import annotations
 
 import os
@@ -7,13 +11,13 @@ import threading
 
 from loguru import logger
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -24,6 +28,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -41,6 +46,88 @@ TYPE_OPTIONS = [('不限', 0), ('视频笔记', 1), ('图文笔记', 2)]
 TIME_OPTIONS = [('不限', 0), ('一天内', 1), ('一周内', 2), ('半年内', 3)]
 
 TABLE_COLUMNS = ['标题', '类型', '作者', '点赞', '收藏', '评论', '发布时间', '链接']
+
+NAV_HOME, NAV_MATRIX, NAV_SETTINGS = 0, 1, 2
+
+
+def line_icon(kind: str, color: str = '#8a8f98', size: int = 18) -> QIcon:
+    """细线风格导航图标（贴近参考图的线性图标）。"""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor
+
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(color), 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        s = size
+        m = s * 0.18
+        if kind == 'home':
+            painter.drawPolyline([
+                QPointF(m, s * 0.48), QPointF(s / 2, m), QPointF(s - m, s * 0.48),
+            ])
+            painter.drawRect(int(s * 0.28), int(s * 0.48), int(s * 0.44), int(s - m - s * 0.48))
+        elif kind == 'grid':
+            cell = (s - 2 * m - s * 0.08) / 2
+            for row in range(2):
+                for col in range(2):
+                    painter.drawRoundedRect(
+                        int(m + col * (cell + s * 0.08)), int(m + row * (cell + s * 0.08)),
+                        int(cell), int(cell), 2, 2,
+                    )
+        elif kind == 'gear':
+            import math
+            painter.drawEllipse(QPointF(s / 2, s / 2), s * 0.2, s * 0.2)
+            for i in range(6):
+                angle = math.pi / 3 * i
+                painter.drawLine(
+                    QPointF(s / 2 + math.cos(angle) * s * 0.3, s / 2 + math.sin(angle) * s * 0.3),
+                    QPointF(s / 2 + math.cos(angle) * s * 0.4, s / 2 + math.sin(angle) * s * 0.4),
+                )
+        elif kind == 'plus':
+            painter.drawLine(QPointF(s / 2, m), QPointF(s / 2, s - m))
+            painter.drawLine(QPointF(m, s / 2), QPointF(s - m, s / 2))
+        elif kind == 'user':
+            painter.drawEllipse(QPointF(s / 2, s * 0.36), s * 0.16, s * 0.16)
+            painter.drawArc(int(s * 0.2), int(s * 0.5), int(s * 0.6), int(s * 0.44), 0, 180 * 16)
+        elif kind == 'folder':
+            painter.drawRoundedRect(int(m), int(s * 0.3), int(s - 2 * m), int(s * 0.44), 3, 3)
+            painter.drawPolyline([
+                QPointF(m, s * 0.3), QPointF(m, s * 0.22),
+                QPointF(s * 0.42, s * 0.22), QPointF(s * 0.48, s * 0.3),
+            ])
+    finally:
+        painter.end()
+    return QIcon(pixmap)
+
+
+def gradient_tile(text: str, colors: list, size: int = 34, radius: int = 10,
+                  font_size: int = 16) -> QPixmap:
+    """渐变圆角方块贴图（logo / 头像）。"""
+    from PySide6.QtGui import QColor, QFont, QLinearGradient
+
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing)
+        gradient = QLinearGradient(0, 0, size, size)
+        for index, color in enumerate(colors):
+            gradient.setColorAt(index / (len(colors) - 1), QColor(color))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(0, 0, size, size, radius, radius)
+        painter.setPen(Qt.white)
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(font_size)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
+    finally:
+        painter.end()
+    return pixmap
 
 
 class _LogBridge(QThread):
@@ -145,9 +232,11 @@ class MainWindow(QMainWindow):
         self.xhs_nickname = ''
         self.collect_worker = None
         self.restore_worker = None
+        self._log_sink_id = None
 
         self.setWindowTitle('小红书采集工具')
-        self.resize(980, 720)
+        self.resize(1120, 760)
+        self.setMinimumSize(1000, 680)
         self._build_ui()
 
         self._log_bridge = _LogBridge(self)
@@ -166,89 +255,342 @@ class MainWindow(QMainWindow):
 
         self.restore_xhs_session()
 
-    # ---------- UI ----------
+    # ---------- UI 骨架 ----------
 
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_sidebar())
+        root.addWidget(self._build_pages(), 1)
 
-        root.addWidget(self._build_header())
+    def _build_sidebar(self) -> QWidget:
+        side = QWidget()
+        side.setObjectName('sidebar')
+        side.setFixedWidth(216)
+        layout = QVBoxLayout(side)
+        layout.setContentsMargins(16, 18, 16, 14)
+        layout.setSpacing(4)
 
+        # Logo
+        logo_row = QHBoxLayout()
+        logo_tile = QLabel()
+        logo_tile.setPixmap(gradient_tile('红', ['#ff8a5c', '#6c5ce7', '#4ec9d4']))
+        logo_tile.setFixedSize(34, 34)
+        logo_tile.setAlignment(Qt.AlignCenter)
+        logo_text_box = QVBoxLayout()
+        logo_text_box.setSpacing(0)
+        logo_name = QLabel('小红书采集')
+        logo_name.setObjectName('logoName')
+        logo_sub = QLabel('Data & Growth')
+        logo_sub.setObjectName('logoSub')
+        logo_text_box.addWidget(logo_name)
+        logo_text_box.addWidget(logo_sub)
+        logo_row.addWidget(logo_tile)
+        logo_row.addSpacing(8)
+        logo_row.addLayout(logo_text_box)
+        logo_row.addStretch(1)
+        layout.addLayout(logo_row)
+        layout.addSpacing(18)
+
+        # 主导航
+        self.nav_buttons = {}
+
+        def add_nav(key, text, icon, badge=None):
+            btn = QPushButton(text)
+            btn.setObjectName('navItem')
+            btn.setIcon(line_icon(icon))
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, k=key: self.switch_page(k))
+            self.nav_buttons[key] = btn
+            if badge:
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(6)
+                row.addWidget(btn, 1)
+                badge_label = QLabel(badge)
+                badge_label.setObjectName('soonBadge')
+                badge_label.setAlignment(Qt.AlignCenter)
+                badge_label.setFixedWidth(40)
+                row.addWidget(badge_label)
+                holder = QWidget()
+                holder.setLayout(row)
+                layout.addWidget(holder)
+            else:
+                layout.addWidget(btn)
+
+        add_nav(NAV_HOME, '采集中心', 'home')
+        add_nav(NAV_MATRIX, '账号矩阵', 'grid', badge='soon')
+        add_nav(NAV_SETTINGS, '设置', 'gear')
+
+        layout.addSpacing(14)
+        section = QLabel('账号')
+        section.setObjectName('navSection')
+        layout.addWidget(section)
+
+        add_row = QHBoxLayout()
+        add_btn = QPushButton('添加小红书账号')
+        add_btn.setObjectName('navSubItem')
+        add_btn.setIcon(line_icon('plus', '#6c5ce7'))
+        add_btn.setCursor(Qt.PointingHandCursor)
+        add_btn.clicked.connect(self.open_xhs_login)
+        add_row.addWidget(add_btn, 1)
+        layout.addLayout(add_row)
+
+        self.xhs_item = QPushButton('小红书 · 未登录')
+        self.xhs_item.setObjectName('navSubItem')
+        self.xhs_item.setIcon(line_icon('user'))
+        self.xhs_item.setCursor(Qt.PointingHandCursor)
+        self.xhs_item.clicked.connect(self.open_xhs_login)
+        layout.addWidget(self.xhs_item)
+
+        layout.addStretch(1)
+
+        # 底部用户卡
+        user_card = QFrame()
+        user_card.setObjectName('userCard')
+        user_layout = QHBoxLayout(user_card)
+        user_layout.setContentsMargins(10, 8, 8, 8)
+        avatar = QLabel()
+        avatar.setPixmap(gradient_tile(
+            (self.session.get('name') or self.session.get('username') or '用')[:1],
+            ['#7d6ef0', '#5a4bd0'], size=30, radius=15, font_size=13,
+        ))
+        avatar.setFixedSize(30, 30)
+        avatar.setAlignment(Qt.AlignCenter)
+        info = QVBoxLayout()
+        info.setSpacing(0)
+        self.account_name_label = QLabel(self.session.get('name') or self.session.get('username') or '')
+        self.account_name_label.setObjectName('userName')
+        self.account_label = QLabel(f"有效期：{self.session.get('xhsExpireTime') or '永久'}")
+        self.account_label.setObjectName('userMeta')
+        info.addWidget(self.account_name_label)
+        info.addWidget(self.account_label)
+        logout_btn = QPushButton('退出')
+        logout_btn.setObjectName('ghostBtn')
+        logout_btn.setCursor(Qt.PointingHandCursor)
+        logout_btn.clicked.connect(self.logout)
+        user_layout.addWidget(avatar)
+        user_layout.addSpacing(8)
+        user_layout.addLayout(info, 1)
+        user_layout.addWidget(logout_btn)
+        layout.addWidget(user_card)
+
+        self.nav_buttons[NAV_HOME].setChecked(True)
+        return side
+
+    def _build_pages(self) -> QWidget:
+        self.pages = QStackedWidget()
+        self.pages.setObjectName('pages')
+        self.pages.addWidget(self._build_home_page())       # NAV_HOME
+        self.pages.addWidget(self._build_matrix_page())     # NAV_MATRIX
+        self.pages.addWidget(self._build_settings_page())   # NAV_SETTINGS
+        return self.pages
+
+    # ---------- 采集中心页 ----------
+
+    def _build_home_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(22, 18, 22, 16)
+        outer.setSpacing(12)
+
+        # 问候头部
+        header = QHBoxLayout()
+        greet_box = QVBoxLayout()
+        greet_box.setSpacing(1)
+        greet = QLabel(f"Hi，{self.session.get('name') or self.session.get('username') or '朋友'}")
+        greet.setObjectName('greetTitle')
+        greet_sub = QLabel('今天想采集点什么？')
+        greet_sub.setObjectName('greetSub')
+        greet_box.addWidget(greet)
+        greet_box.addWidget(greet_sub)
+        header.addLayout(greet_box)
+        header.addStretch(1)
+        self.xhs_label = QLabel('小红书：未登录')
+        self.xhs_label.setObjectName('xhsState')
+        header.addWidget(self.xhs_label)
+        self.xhs_login_btn = QPushButton('扫码登录小红书')
+        self.xhs_login_btn.setObjectName('primaryBtn')
+        self.xhs_login_btn.setIcon(line_icon('user', '#ffffff'))
+        self.xhs_login_btn.setCursor(Qt.PointingHandCursor)
+        self.xhs_login_btn.clicked.connect(self.open_xhs_login)
+        header.addWidget(self.xhs_login_btn)
+        open_dir_btn = QPushButton('输出目录')
+        open_dir_btn.setObjectName('softBtn')
+        open_dir_btn.setIcon(line_icon('folder'))
+        open_dir_btn.setCursor(Qt.PointingHandCursor)
+        open_dir_btn.clicked.connect(self.open_output_dir)
+        header.addWidget(open_dir_btn)
+        outer.addLayout(header)
+
+        # 渐变统计卡
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+        self.stat_expire = self._stat_card(cards, 'statCard1', '账号有效期', self.session.get('xhsExpireTime') or '永久')
+        self.stat_count = self._stat_card(cards, 'statCard2', '本次已采集', '0 篇')
+        self.stat_xhs = self._stat_card(cards, 'statCard3', '小红书账号', '未登录')
+        outer.addLayout(cards)
+
+        # 采集页签卡
+        collect_card = QFrame()
+        collect_card.setObjectName('card')
+        card_layout = QVBoxLayout(collect_card)
+        card_layout.setContentsMargins(6, 6, 6, 10)
         self.tabs = QTabWidget()
+        self.tabs.setObjectName('collectTabs')
         self.tabs.addTab(self._build_search_tab(), '搜索采集')
         self.tabs.addTab(self._build_urls_tab(), '链接采集')
         self.tabs.addTab(self._build_user_tab(), '主页采集')
-        root.addWidget(self.tabs, 1)
+        card_layout.addWidget(self.tabs)
+        outer.addWidget(collect_card, 1)
 
-        root.addWidget(self._build_options_box())
-        root.addWidget(self._build_run_row())
+        # 保存选项 + 运行行
+        options_row = QHBoxLayout()
+        options_row.setSpacing(12)
+        options_card = QFrame()
+        options_card.setObjectName('card')
+        options_layout = QHBoxLayout(options_card)
+        options_layout.setContentsMargins(14, 10, 14, 10)
+        out_label = QLabel('输出目录')
+        out_label.setObjectName('mutedLabel')
+        self.output_edit = QLineEdit(self.config.get('output_dir') or str(paths.DEFAULT_OUTPUT_DIR))
+        browse_btn = QPushButton('浏览')
+        browse_btn.setObjectName('softBtn')
+        browse_btn.clicked.connect(self.browse_output_dir)
+        self.task_edit = QLineEdit()
+        self.task_edit.setPlaceholderText('任务名，留空自动生成')
+        self.task_edit.setFixedWidth(170)
+        self.img_check = QCheckBox('图片')
+        self.img_check.setChecked(True)
+        self.video_check = QCheckBox('视频')
+        self.video_check.setChecked(True)
+        self.excel_check = QCheckBox('Excel')
+        self.excel_check.setChecked(True)
+        options_layout.addWidget(out_label)
+        options_layout.addWidget(self.output_edit, 1)
+        options_layout.addWidget(browse_btn)
+        options_layout.addSpacing(8)
+        options_layout.addWidget(self.task_edit)
+        options_layout.addSpacing(8)
+        options_layout.addWidget(self.img_check)
+        options_layout.addWidget(self.video_check)
+        options_layout.addWidget(self.excel_check)
+        options_row.addWidget(options_card, 1)
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumHeight(150)
-        self.log_view.setPlaceholderText('运行日志')
-        root.addWidget(self.log_view)
+        run_card = QFrame()
+        run_card.setObjectName('card')
+        run_layout = QHBoxLayout(run_card)
+        run_layout.setContentsMargins(14, 10, 14, 10)
+        self.run_btn = QPushButton('开始采集')
+        self.run_btn.setObjectName('primaryBtn')
+        self.run_btn.setMinimumHeight(34)
+        self.run_btn.setMinimumWidth(104)
+        self.run_btn.setCursor(Qt.PointingHandCursor)
+        self.run_btn.clicked.connect(self.toggle_run)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.stage_label = QLabel('')
+        self.stage_label.setObjectName('mutedLabel')
+        run_layout.addWidget(self.run_btn)
+        run_layout.addSpacing(6)
+        run_layout.addWidget(self.progress_bar, 1)
+        run_layout.addWidget(self.stage_label)
+        options_row.addWidget(run_card)
+        outer.addLayout(options_row)
 
+        # 结果表 + 日志
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
         self.table = QTableWidget(0, len(TABLE_COLUMNS))
+        self.table.setObjectName('resultTable')
         self.table.setHorizontalHeaderLabels(TABLE_COLUMNS)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.doubleClicked.connect(self.open_current_note)
-        root.addWidget(self.table, 2)
+        bottom.addWidget(self.table, 1)
 
-    def _build_header(self) -> QWidget:
-        box = QWidget()
-        layout = QHBoxLayout(box)
-        layout.setContentsMargins(0, 4, 0, 4)
+        log_card = QFrame()
+        log_card.setObjectName('card')
+        log_card.setFixedWidth(264)
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(12, 10, 12, 10)
+        log_title = QLabel('运行日志')
+        log_title.setObjectName('cardTitle')
+        self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName('logView')
+        self.log_view.setReadOnly(True)
+        self.log_view.setPlaceholderText('任务日志将显示在这里')
+        log_layout.addWidget(log_title)
+        log_layout.addWidget(self.log_view, 1)
+        bottom.addWidget(log_card)
+        outer.addLayout(bottom, 1)
+        return page
 
-        expire = self.session.get('xhsExpireTime') or '永久'
-        name = self.session.get('name') or self.session.get('username') or ''
-        self.account_label = QLabel(f'账号：{name}    有效期至：{expire}')
-        layout.addWidget(self.account_label)
-        layout.addStretch(1)
-
-        self.xhs_label = QLabel('小红书：检测中…')
-        layout.addWidget(self.xhs_label)
-        self.xhs_login_btn = QPushButton('扫码登录小红书')
-        self.xhs_login_btn.clicked.connect(self.open_xhs_login)
-        layout.addWidget(self.xhs_login_btn)
-        open_dir_btn = QPushButton('打开输出目录')
-        open_dir_btn.clicked.connect(self.open_output_dir)
-        layout.addWidget(open_dir_btn)
-        logout_btn = QPushButton('退出登录')
-        logout_btn.clicked.connect(self.logout)
-        layout.addWidget(logout_btn)
-        return box
+    def _stat_card(self, parent_layout, object_name: str, label: str, value: str) -> QLabel:
+        card = QFrame()
+        card.setObjectName(object_name)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(3)
+        cap = QLabel(label)
+        cap.setObjectName('statLabel')
+        val = QLabel(value)
+        val.setObjectName('statValue')
+        layout.addWidget(cap)
+        layout.addWidget(val)
+        parent_layout.addWidget(card, 1)
+        return val
 
     def _build_search_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
+        form.setContentsMargins(12, 14, 12, 4)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignRight)
         self.query_edit = QLineEdit()
         self.query_edit.setPlaceholderText('搜索关键词，例如：黄金首饰')
         form.addRow('关键词', self.query_edit)
         self.num_spin = QSpinBox()
         self.num_spin.setRange(1, 500)
         self.num_spin.setValue(20)
-        form.addRow('数量', self.num_spin)
         self.sort_combo = QComboBox()
         for text, value in SORT_OPTIONS:
             self.sort_combo.addItem(text, value)
-        form.addRow('排序', self.sort_combo)
         self.type_combo = QComboBox()
         for text, value in TYPE_OPTIONS:
             self.type_combo.addItem(text, value)
-        form.addRow('类型', self.type_combo)
         self.time_combo = QComboBox()
         for text, value in TIME_OPTIONS:
             self.time_combo.addItem(text, value)
-        form.addRow('时间', self.time_combo)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        filter_row.addWidget(QLabel('数量'))
+        filter_row.addWidget(self.num_spin)
+        filter_row.addSpacing(10)
+        filter_row.addWidget(QLabel('排序'))
+        filter_row.addWidget(self.sort_combo)
+        filter_row.addSpacing(10)
+        filter_row.addWidget(QLabel('类型'))
+        filter_row.addWidget(self.type_combo)
+        filter_row.addSpacing(10)
+        filter_row.addWidget(QLabel('时间'))
+        filter_row.addWidget(self.time_combo)
+        filter_row.addStretch(1)
+        form.addRow('筛选', filter_row)
         return tab
 
     def _build_urls_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 14, 12, 10)
         self.urls_edit = QPlainTextEdit()
         self.urls_edit.setPlaceholderText(
             '每行一个笔记链接，例如：\n'
@@ -260,59 +602,89 @@ class MainWindow(QMainWindow):
     def _build_user_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
+        form.setContentsMargins(12, 14, 12, 10)
+        form.setSpacing(10)
         self.user_edit = QLineEdit()
         self.user_edit.setPlaceholderText(
             '用户主页链接，例如：https://www.xiaohongshu.com/user/profile/xxxx?xsec_token=...'
         )
         form.addRow('主页', self.user_edit)
         hint = QLabel('将采集该用户公开可见的全部笔记。')
-        hint.setStyleSheet('color:#666;')
+        hint.setObjectName('mutedLabel')
         form.addRow('', hint)
         return tab
 
-    def _build_options_box(self) -> QWidget:
-        box = QGroupBox('保存选项')
-        layout = QFormLayout(box)
+    # ---------- 矩阵占位页 ----------
 
+    def _build_matrix_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(22, 18, 22, 16)
+        card = QFrame()
+        card.setObjectName('card')
+        box = QVBoxLayout(card)
+        box.setAlignment(Qt.AlignCenter)
+        box.setSpacing(10)
+        icon = QLabel('🧩')
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet('font-size:44px; background: transparent;')
+        title = QLabel('账号矩阵 · 开发中')
+        title.setObjectName('greetTitle')
+        title.setAlignment(Qt.AlignCenter)
+        desc = QLabel('多账号统一管理、批量采集与发布调度。\n侧边栏入口已预留，规划中敬请期待。')
+        desc.setObjectName('mutedLabel')
+        desc.setAlignment(Qt.AlignCenter)
+        box.addWidget(icon)
+        box.addWidget(title)
+        box.addWidget(desc)
+        outer.addWidget(card, 1)
+        return page
+
+    # ---------- 设置页 ----------
+
+    def _build_settings_page(self) -> QWidget:
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(22, 18, 22, 16)
+        card = QFrame()
+        card.setObjectName('card')
+        box = QVBoxLayout(card)
+        box.setContentsMargins(18, 16, 18, 16)
+        title = QLabel('设置')
+        title.setObjectName('greetTitle')
+        box.addWidget(title)
+        form = QFormLayout()
+        form.setContentsMargins(0, 10, 0, 0)
+        form.setSpacing(12)
+        server_edit = QLineEdit(self.session.get('server') or self.config.get('server') or '')
+        server_edit.setReadOnly(True)
+        form.addRow('服务器', server_edit)
         dir_row = QHBoxLayout()
-        self.output_edit = QLineEdit(self.config.get('output_dir') or str(paths.DEFAULT_OUTPUT_DIR))
-        browse_btn = QPushButton('浏览…')
+        self.settings_output_edit = QLineEdit(self.output_edit.text())
+        dir_row.addWidget(self.settings_output_edit, 1)
+        browse_btn = QPushButton('浏览')
+        browse_btn.setObjectName('softBtn')
         browse_btn.clicked.connect(self.browse_output_dir)
-        dir_row.addWidget(self.output_edit, 1)
+        open_btn = QPushButton('打开')
+        open_btn.setObjectName('softBtn')
+        open_btn.clicked.connect(self.open_output_dir)
         dir_row.addWidget(browse_btn)
-        layout.addRow('输出目录', dir_row)
+        dir_row.addWidget(open_btn)
+        form.addRow('输出目录', dir_row)
+        clear_btn = QPushButton('清除小红书登录状态')
+        clear_btn.setObjectName('dangerBtn')
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.clicked.connect(self.forget_xhs_session)
+        form.addRow('小红书', clear_btn)
+        box.addLayout(form)
+        box.addStretch(1)
+        outer.addWidget(card, 1)
+        return page
 
-        self.task_edit = QLineEdit()
-        self.task_edit.setPlaceholderText('留空则自动使用：关键词/用户ID + 时间')
-        layout.addRow('任务名', self.task_edit)
-
-        check_row = QHBoxLayout()
-        self.img_check = QCheckBox('保存图片')
-        self.img_check.setChecked(True)
-        self.video_check = QCheckBox('保存视频')
-        self.video_check.setChecked(True)
-        self.excel_check = QCheckBox('导出 Excel')
-        self.excel_check.setChecked(True)
-        check_row.addWidget(self.img_check)
-        check_row.addWidget(self.video_check)
-        check_row.addWidget(self.excel_check)
-        check_row.addStretch(1)
-        layout.addRow('内容', check_row)
-        return box
-
-    def _build_run_row(self) -> QWidget:
-        box = QWidget()
-        layout = QHBoxLayout(box)
-        self.run_btn = QPushButton('开始采集')
-        self.run_btn.setMinimumHeight(34)
-        self.run_btn.clicked.connect(self.toggle_run)
-        layout.addWidget(self.run_btn)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar, 1)
-        self.stage_label = QLabel('')
-        layout.addWidget(self.stage_label)
-        return box
+    def switch_page(self, key: int):
+        for k, btn in self.nav_buttons.items():
+            btn.setChecked(k == key)
+        self.pages.setCurrentIndex(key)
 
     # ---------- 小红书会话 ----------
 
@@ -343,12 +715,31 @@ class MainWindow(QMainWindow):
         if logged_in:
             text = nickname or '已登录'
             self.xhs_label.setText(f'小红书：{text}')
-            self.xhs_label.setStyleSheet('color:#2e7d32;')
-            self.xhs_login_btn.setText('切换小红书账号')
+            self.xhs_label.setObjectName('xhsStateOk')
+            self.xhs_login_btn.setText('切换账号')
+            self.stat_xhs.setText(text)
+            self.xhs_item.setText(f'小红书 · {text}')
+            self.xhs_item.setIcon(line_icon('user', '#2fbf8f'))
         else:
             self.xhs_label.setText('小红书：未登录')
-            self.xhs_label.setStyleSheet('color:#c62828;')
+            self.xhs_label.setObjectName('xhsStateBad')
             self.xhs_login_btn.setText('扫码登录小红书')
+            self.stat_xhs.setText('未登录')
+            self.xhs_item.setText('小红书 · 未登录')
+            self.xhs_item.setIcon(line_icon('user'))
+        self._restyle(self.xhs_label)
+        self.xhs_label.setStyleSheet('')
+
+    def _restyle(self, widget: QWidget):
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+
+    def forget_xhs_session(self):
+        self.auth = None
+        paths.clear_xhs_cookie()
+        self.set_xhs_state(False, '')
+        self.append_log('已清除小红书登录状态')
 
     def open_xhs_login(self):
         dialog = XhsLoginDialog(self)
@@ -424,6 +815,7 @@ class MainWindow(QMainWindow):
         paths.save_config(self.config)
 
         self.table.setRowCount(0)
+        self.stat_count.setText('0 篇')
         self.progress_bar.setValue(0)
         self.stage_label.setText('')
         self.run_btn.setText('停止')
@@ -461,6 +853,7 @@ class MainWindow(QMainWindow):
                 item.setForeground(Qt.blue)
             item.setData(Qt.UserRole, note.get('note_url') or '')
             self.table.setItem(row, column, item)
+        self.stat_count.setText(f'{row + 1} 篇')
 
     def open_current_note(self, index):
         item = self.table.item(index.row(), 7)
@@ -509,9 +902,8 @@ class MainWindow(QMainWindow):
         self._check_worker = worker
 
     def _on_check_ok(self, expire: str):
-        self.account_label.setText(
-            f"账号：{self.session.get('name') or self.session.get('username')}    有效期至：{expire}"
-        )
+        self.account_label.setText(f'有效期：{expire}')
+        self.stat_expire.setText(expire)
 
     def _on_check_failed(self, message: str):
         QMessageBox.warning(self, '登录状态失效', message)
@@ -543,6 +935,7 @@ class MainWindow(QMainWindow):
         chosen = QFileDialog.getExistingDirectory(self, '选择输出目录', current)
         if chosen:
             self.output_edit.setText(chosen)
+            self.settings_output_edit.setText(chosen)
 
     def open_output_dir(self):
         path = self.output_edit.text().strip() or str(paths.DEFAULT_OUTPUT_DIR)

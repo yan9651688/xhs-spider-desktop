@@ -62,12 +62,13 @@ class XhsLoginDialog(QDialog):
         self.thread = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(12)
         self.qr_label = QLabel('点击下方按钮生成二维码')
+        self.qr_label.setObjectName('qrCard')
+        self.qr_label.setAttribute(Qt.WA_StyledBackground, True)
         self.qr_label.setAlignment(Qt.AlignCenter)
         self.qr_label.setMinimumSize(320, 320)
-        self.qr_label.setStyleSheet(
-            'border:1px solid #e0e0e0; border-radius:8px; background:#fff;'
-        )
         layout.addWidget(self.qr_label)
 
         self.hint = QLabel('用小红书 App 首页左上角「扫一扫」扫码，并在手机上确认登录。')
@@ -83,6 +84,7 @@ class XhsLoginDialog(QDialog):
 
         buttons = QHBoxLayout()
         self.start_btn = QPushButton('开始扫码 / 刷新二维码')
+        self.start_btn.setObjectName('primaryBtn')
         self.start_btn.clicked.connect(self.start)
         self.cancel_btn = QPushButton('取消')
         self.cancel_btn.clicked.connect(self.reject)
@@ -118,6 +120,7 @@ class XhsLoginDialog(QDialog):
                 )
             )
             self.status.setText('请使用小红书 App 扫码，扫码后请在手机上确认')
+            self.status.setStyleSheet('color:#6b7180;')
         except Exception as exc:
             self._on_failed(f'二维码渲染失败：{exc}')
 
