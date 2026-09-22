@@ -20,7 +20,12 @@ def ensure_node_runtime() -> bool:
         meipass = getattr(sys, '_MEIPASS', None)
         if meipass:
             candidates.append(os.path.join(meipass, 'node_dist', 'bin'))
-    candidates += ['/opt/homebrew/bin', '/usr/local/bin']
+    candidates += [
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        os.path.expanduser('~/.local/opt/node/bin'),
+        os.path.expanduser('~/node/bin'),
+    ]
 
     path = os.environ.get('PATH', '')
     for candidate in candidates:
