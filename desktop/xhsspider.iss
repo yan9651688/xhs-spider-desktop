@@ -4,10 +4,10 @@
 ; 可用 /DMyAppVersion=1.0.0 覆盖版本号
 
 #ifndef SourceDir
-#define SourceDir "dist\XhsSpider"
+#define SourceDir "..\dist\XhsSpider"
 #endif
 #ifndef OutputDir
-#define OutputDir "dist"
+#define OutputDir "..\dist"
 #endif
 #ifndef MyAppVersion
 #define MyAppVersion "1.0.0"
@@ -23,7 +23,7 @@ DefaultGroupName=XhsSpider
 UninstallDisplayName=XhsSpider
 OutputDir={#OutputDir}
 OutputBaseFilename=XhsSpider-Setup-x64
-SetupIconFile=assets\app.ico
+SetupIconFile=..\assets\app.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

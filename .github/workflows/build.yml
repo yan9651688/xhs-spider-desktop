@@ -45,7 +45,7 @@ jobs:
         shell: cmd
         run: |
           choco install innosetup -y --no-progress
-          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /DSourceDir=dist\XhsSpider /DOutputDir=dist desktop\xhsspider.iss
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" desktop\xhsspider.iss
       - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
