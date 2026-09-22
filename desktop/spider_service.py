@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ class TaskSpec:
     save_excel: bool = True
     zip_export: bool = True         # 导出小绿书 zip（xiao 赛道上传格式）
     ai_cfg: dict = field(default_factory=dict)   # 非空时抓取后逐篇 AI 改写
+    delay_seconds: float = 2.0      # 每篇间隔（防风控限速），0=不限速
     task_name: str = ''
     output_dir: str = ''
 
@@ -81,6 +83,18 @@ def collect_note_urls(api, spec: TaskSpec):
     raise RuntimeError(f'未知任务模式：{spec.mode}')
 
 
+RISK_KEYWORDS = ('461', '-629', '频繁', '风控', '验证码', '异常流量')
+
+
+def _throttle(delay: float, should_stop) -> None:
+    """带随机抖动的限速等待，0.2s 粒度响应停止请求。"""
+    if delay <= 0:
+        return
+    target = time.monotonic() + random.uniform(delay * 0.7, delay * 1.3)
+    while time.monotonic() < target and not should_stop():
+        time.sleep(0.2)
+
+
 def run_collection(auth, spec: TaskSpec, should_stop, emit):
     """执行一次采集任务，返回摘要 dict。
 
@@ -108,6 +122,10 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
             spec.ai_cfg.get('model') or '', spec.ai_cfg.get('prompt') or '',
         )
         emit.log(f"AI 改写已开启（模型：{ai_client.model}）")
+    if spec.delay_seconds > 0:
+        emit.log(f'防风控限速已开启：每篇间隔约 {spec.delay_seconds:g} 秒')
+    else:
+        emit.log('警告：未开启限速，高频采集容易触发小红书风控')
 
     note_list = []
     for index, url in enumerate(urls, start=1):
@@ -132,8 +150,14 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
             note_list.append(note_info)
             emit.note(note_info)
         else:
+            detail = str(msg)
             emit.log(f'抓取失败（{index}/{total}）：{msg}')
+            if any(k in detail for k in RISK_KEYWORDS):
+                emit.log('疑似触发风控限流：建议停止任务，等待 10-30 分钟，'
+                         '并调大采集间隔或减少数量后再试')
         emit.progress(index, total, '抓取')
+        if index < total:
+            _throttle(spec.delay_seconds, should_stop)
 
     task_name = sanitize_name(spec.task_name)
     base_dir = os.path.join(spec.output_dir, task_name)

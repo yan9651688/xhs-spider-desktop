@@ -493,11 +493,13 @@ class MainWindow(QMainWindow):
         task_label.setObjectName('mutedLabel')
         self.task_edit = QLineEdit()
         self.task_edit.setPlaceholderText('可留空，默认关键词/用户ID')
-        self.task_edit.setFixedWidth(180)
+        grid.addWidget(task_label, 1, 0)
+        grid.addWidget(self.task_edit, 1, 1, 1, 3)
+
         content_label = QLabel('保存内容')
         content_label.setObjectName('mutedLabel')
         checks_row = QHBoxLayout()
-        checks_row.setSpacing(10)
+        checks_row.setSpacing(18)
         self.img_check = QCheckBox('图片')
         self.img_check.setChecked(True)
         self.video_check = QCheckBox('视频')
@@ -513,19 +515,18 @@ class MainWindow(QMainWindow):
                   self.zip_check, self.ai_check):
             checks_row.addWidget(w)
         checks_row.addStretch(1)
-        grid.addWidget(task_label, 1, 0)
-        grid.addWidget(self.task_edit, 1, 1)
-        grid.addWidget(content_label, 1, 2)
-        grid.addLayout(checks_row, 1, 3)
+        grid.addWidget(content_label, 2, 0)
+        grid.addLayout(checks_row, 2, 1, 1, 3)
         grid.setColumnStretch(1, 3)
         grid.setColumnStretch(3, 2)
         outer.addWidget(options_card)
 
-        # 运行行（整行）：开始采集 + 进度 + 阶段
+        # 运行行（整行）：开始采集 + 进度 + 限速 + 阶段
         run_card = QFrame()
         run_card.setObjectName('card')
         run_layout = QHBoxLayout(run_card)
         run_layout.setContentsMargins(14, 10, 14, 10)
+        run_layout.setSpacing(8)
         self.run_btn = QPushButton('开始采集')
         self.run_btn.setObjectName('primaryBtn')
         self.run_btn.setMinimumHeight(34)
@@ -536,9 +537,20 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.stage_label = QLabel('')
         self.stage_label.setObjectName('mutedLabel')
+        delay_label = QLabel('采集间隔')
+        delay_label.setObjectName('mutedLabel')
+        self.delay_spin = QSpinBox()
+        self.delay_spin.setRange(0, 60)
+        self.delay_spin.setValue(2)
+        self.delay_spin.setSuffix(' 秒')
+        self.delay_spin.setToolTip(
+            '每篇笔记之间的等待时间，防风控限流。\n0 = 不限速（不推荐，容易触发小红书风控）'
+        )
         run_layout.addWidget(self.run_btn)
         run_layout.addSpacing(6)
         run_layout.addWidget(self.progress_bar, 1)
+        run_layout.addWidget(delay_label)
+        run_layout.addWidget(self.delay_spin)
         run_layout.addWidget(self.stage_label)
         outer.addWidget(run_card)
 
@@ -911,6 +923,7 @@ class MainWindow(QMainWindow):
             save_excel=self.excel_check.isChecked(),
             zip_export=self.zip_check.isChecked(),
             ai_cfg=ai_cfg,
+            delay_seconds=float(self.delay_spin.value()),
             task_name=self.task_edit.text().strip(),
             output_dir=self.output_edit.text().strip() or str(paths.DEFAULT_OUTPUT_DIR),
         )
