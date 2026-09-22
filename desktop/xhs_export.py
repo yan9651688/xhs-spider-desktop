@@ -19,24 +19,6 @@ from PIL import Image
 from desktop.spider_service import sanitize_name
 
 IMAGE_TIMEOUT = 20
-_HEX = set('0123456789abcdefABCDEF')
-
-
-def id_prefix_24(note_id: str) -> str:
-    """取笔记 ID 的前 24 位十六进制作为文件夹 ID 前缀。
-
-    xiao 端（UserTrackService.extractTitleFromFolderName）固定剥离 24 位十六进制，
-    而小红书新笔记 ID 已出现 25 位，超出的尾位会污染标题，这里统一截齐。
-    """
-    run = ''
-    for ch in str(note_id or ''):
-        if ch in _HEX:
-            run += ch
-            if len(run) == 24:
-                break
-        else:
-            break
-    return run
 
 
 def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
@@ -56,11 +38,21 @@ def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
 
 
 def export_note_folder(note: dict, base_dir: str, should_stop=None,
-                       progress=None) -> str | None:
-    """把一篇笔记导出为 {24位ID}{标题}/ 文件夹，返回文件夹路径；无图返回 None。"""
+                       progress=None, used_names: set | None = None) -> str | None:
+    """把一篇笔记导出为 {标题}/ 文件夹，返回文件夹路径；无图返回 None。
+
+    文件夹名即上传后的文章标题（xiao 对无 ID 前缀的文件夹取全名当标题）；
+    同名笔记自动追加 _2、_3 序号避免 zip 内互相覆盖。
+    """
     title = note.get('title_ai') or note.get('title') or '无标题'
-    prefix = id_prefix_24(note.get('note_id', ''))
-    folder_name = f"{prefix}{sanitize_name(title).lstrip('_')}"[:120]
+    base = sanitize_name(title).strip('_') or '无标题'
+    folder_name = base
+    if used_names is not None:
+        serial = 2
+        while folder_name in used_names:
+            folder_name = f'{base}_{serial}'
+            serial += 1
+        used_names.add(folder_name)
     folder = os.path.join(base_dir, folder_name)
     os.makedirs(folder, exist_ok=True)
 
@@ -95,10 +87,12 @@ def export_xiaolvsu_zip(note_list: list, out_dir: str, task_name: str,
     os.makedirs(folders_dir, exist_ok=True)
 
     packed = 0
+    used_names: set = set()
     for note in note_list:
         if should_stop is not None and should_stop():
             break
-        folder = export_note_folder(note, folders_dir, should_stop)
+        folder = export_note_folder(note, folders_dir, should_stop,
+                                    progress=None, used_names=used_names)
         if folder is None:
             if emit:
                 emit.log(f"跳过无图片笔记：{(note.get('title_ai') or note.get('title') or '')[:20]}")

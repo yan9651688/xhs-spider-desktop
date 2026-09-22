@@ -217,12 +217,28 @@ def test_xiaolvsu_zip():
     check('zip 已生成', bool(zip_path) and zip_path.endswith('.zip'))
     with zipfile_mod.ZipFile(zip_path) as zf:
         names = zf.namelist()
-    folder = '683fe17f0000000023017c6a测试_笔记_A标题'
-    check('zip 内文件夹名为 note_id+清洗标题', f'{folder}/文案.txt' in names, str(names))
+    folder = '测试_笔记_A标题'
+    check('文件夹名为纯标题（无ID前缀）', f'{folder}/文案.txt' in names, str(names))
     check('图片按 1.jpg/2.jpg 顺序命名', f'{folder}/1.jpg' in names and f'{folder}/2.jpg' in names)
     with zipfile_mod.ZipFile(zip_path) as zf:
         txt = zf.read(f'{folder}/文案.txt').decode('utf-8')
     check('文案.txt 内容为 desc', txt == '这是文案内容')
+
+    # 同名标题自动加序号，避免 zip 内互相覆盖
+    dup = [
+        {'note_id': 'a' * 24, 'title': '同题', 'desc': '一', 'image_list': ['x']},
+        {'note_id': 'b' * 24, 'title': '同题', 'desc': '二', 'image_list': ['x']},
+    ]
+    tmp2 = tempfile.mkdtemp()
+    zip2 = export_mod.export_xiaolvsu_zip(dup, tmp2, '重名任务')
+    with zipfile_mod.ZipFile(zip2) as zf:
+        names2 = set(zf.namelist())
+    check('重名标题第二个自动加 _2',
+          f'同题/文案.txt' in names2 and f'同题_2/文案.txt' in names2, str(names2))
+    with zipfile_mod.ZipFile(zip2) as zf:
+        c1 = zf.read('同题/文案.txt').decode('utf-8')
+        c2 = zf.read('同题_2/文案.txt').decode('utf-8')
+    check('重名笔记内容各自保留', c1 == '一' and c2 == '二')
 
     # 无图笔记应被跳过
     no_img = [{'note_id': 'a' * 24, 'title': '无图', 'desc': 'x', 'image_list': []}]
@@ -262,19 +278,7 @@ def test_should_collect():
     check('未勾图片：视频笔记仍采集', _should_collect({'note_type': '视频'}, no_image))
 
 
-# ---------- 4b. 25位ID对齐 xiao 24位剥离规则 ----------
-
-def test_id_prefix():
-    from desktop.xhs_export import id_prefix_24
-
-    check('24位ID原样保留',
-          id_prefix_24('683fe17f0000000023017c6a') == '683fe17f0000000023017c6a')
-    check('25位ID截齐为24位',
-          id_prefix_24('6a13b5420000000003803609f') == '6a13b5420000000003803609')
-    # 模拟 xiao extractTitleFromFolderName：剥24位后标题必须干净
-    folder = id_prefix_24('6a13b5420000000003803609f') + '甜？答案笑到打鸣'
-    extracted = folder[24:] if folder[:24].isalnum() else folder
-    check('xiao剥离后标题无脏字符', extracted == '甜？答案笑到打鸣', extracted)
+# ---------- 4b. 重名/ID 相关已并入 test_xiaolvsu_zip ----------
 
 
 if __name__ == '__main__':
@@ -284,7 +288,6 @@ if __name__ == '__main__':
     test_xiaolvsu_zip()
     test_ai_parse()
     test_should_collect()
-    test_id_prefix()
     print()
     if FAILURES:
         print(f'自检失败 {len(FAILURES)} 项：{FAILURES}')
