@@ -826,6 +826,7 @@ class XHSLoginApi:
         show_in_terminal=True,
         timeout_seconds=180,
         poll_interval=2.0,
+        qr_callback=None,
     ):
         logger.info('[1/5] 正在初始化匿名设备...')
         try:
@@ -860,7 +861,9 @@ class XHSLoginApi:
             return None
 
         logger.info('请使用小红书APP扫描以下二维码:')
-        if show_in_terminal:
+        if qr_callback is not None:
+            qr_callback(qr_data['qr_url'])
+        elif show_in_terminal:
             self.show_qrcode_terminal(qr_data['qr_url'])
         else:
             self.show_qrcode_image(qr_data['qr_url'])

@@ -462,11 +462,14 @@ class XHSPcAuth(XHSAuth):
         show_in_terminal: bool = True,
         proxies: Optional[dict] = None,
         http_client: Optional[PcHttpClient] = None,
+        qr_callback=None,
     ) -> 'XHSPcAuth':
         """Login through the local QR API flow and return a ready Auth object.
 
         The QR is rendered locally and scanned with the XHS mobile app. No web
         browser, browser Cookie export, or browser JavaScript execution is used.
+        ``qr_callback(url)`` lets GUI callers receive the QR content instead of
+        terminal/image rendering.
         """
         from apis.xhs_pc_login_apis import XHSLoginApi
 
@@ -476,7 +479,8 @@ class XHSPcAuth(XHSAuth):
             http_client=http_client,
         )
         cookies = login.qrcode_login(
-            show_in_terminal=show_in_terminal
+            show_in_terminal=show_in_terminal,
+            qr_callback=qr_callback,
         )
         if not cookies:
             http_client.close()
