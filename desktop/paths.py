@@ -18,6 +18,11 @@ DEFAULT_CONFIG = {
     'server': DEFAULT_SERVER,
     'username': '',
     'output_dir': str(DEFAULT_OUTPUT_DIR),
+    # AI 改写（OpenAI Responses API 兼容）
+    'ai_base': 'https://api.openai.com/v1',
+    'ai_key': '',
+    'ai_model': 'gpt-4o-mini',
+    'ai_prompt': '',   # 空=使用 ai_client.DEFAULT_PROMPT 预设
 }
 
 

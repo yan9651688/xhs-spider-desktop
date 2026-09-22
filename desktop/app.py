@@ -35,6 +35,33 @@ def ensure_node_runtime() -> bool:
     return shutil.which('node') is not None
 
 
+def _ensure_check_icon() -> str:
+    """生成紫色对勾指示图（QSS 的 image:url 需要真实文件路径）。"""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+
+    path = os.path.join(os.path.expanduser('~'), '.xhs_spider', 'check.png')
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor('#6c5ce7'))
+            painter.drawRoundedRect(0, 0, 16, 16, 5, 5)
+            painter.setPen(QPen(QColor('#ffffff'), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolyline([QPointF(3.5, 8.5), QPointF(6.8, 11.8), QPointF(12.5, 4.5)])
+        finally:
+            painter.end()
+        pixmap.save(path, 'PNG')
+    except Exception:
+        return ''
+    return path
+
+
 STYLE = """
 /* ============ 全局 ============ */
 QWidget {
@@ -290,7 +317,7 @@ QCheckBox::indicator {
 QCheckBox::indicator:checked {
     background-color: #6c5ce7;
     border-color: #6c5ce7;
-    image: url(none);
+    image: url(__CHECK_PNG__);
 }
 QCheckBox::indicator:hover { border-color: #6c5ce7; }
 
@@ -330,7 +357,8 @@ def main(argv=None) -> int:
     app = QApplication(argv)
     app.setApplicationName('小红书采集工具')
     app.setOrganizationName('xhs-spider')
-    app.setStyleSheet(STYLE)
+    check_png = _ensure_check_icon()
+    app.setStyleSheet(STYLE.replace('__CHECK_PNG__', check_png.replace('\\', '/')))
 
     if not node_ok:
         QMessageBox.warning(

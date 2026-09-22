@@ -171,14 +171,80 @@ def test_task_spec():
     check('仅图片映射为 media-image', spec.save_choice == 'media-image')
     spec = TaskSpec(save_images=False, save_videos=False, save_excel=True)
     check('不保存媒体时 save_choice 为空', spec.save_choice == '' and not spec.want_media)
+    check('小绿书打包默认开启', TaskSpec().zip_export is True)
     check('任务名清洗非法字符', sanitize_name('a/b:c*?') == 'a_b_c_')
     check('空任务名回退时间戳', len(sanitize_name('   ')) >= 8)
+
+
+# ---------- 4. 小绿书 zip 导出 ----------
+
+def test_xiaolvsu_zip():
+    import io
+    import tempfile
+    import zipfile as zipfile_mod
+
+    from PIL import Image
+
+    from desktop.xhs_export import export_xiaolvsu_zip
+
+    tmp = tempfile.mkdtemp()
+    img_buf = io.BytesIO()
+    Image.new('RGB', (30, 30), (200, 60, 60)).save(img_buf, 'PNG')
+
+    notes = [
+        {
+            'note_id': '683fe17f0000000023017c6a',
+            'title': '测试 笔记/A标题',
+            'desc': '这是文案内容',
+            'image_list': [f'file://{img_buf.name}' if False else None],
+        },
+    ]
+    # 用本地文件 URL 不可行，改为 monkeypatch 下载函数
+    import desktop.xhs_export as export_mod
+
+    def fake_download(url, dest_dir, index):
+        with open(f'{dest_dir}/{index}.jpg', 'wb') as f:
+            f.write(img_buf.getvalue())
+        return True
+
+    export_mod._download_as_jpg = fake_download
+    notes[0]['image_list'] = ['x://a', 'x://b']
+
+    zip_path = export_mod.export_xiaolvsu_zip(notes, tmp, '测试任务')
+    check('zip 已生成', bool(zip_path) and zip_path.endswith('.zip'))
+    with zipfile_mod.ZipFile(zip_path) as zf:
+        names = zf.namelist()
+    folder = '683fe17f0000000023017c6a测试_笔记_A标题'
+    check('zip 内文件夹名为 note_id+清洗标题', f'{folder}/文案.txt' in names, str(names))
+    check('图片按 1.jpg/2.jpg 顺序命名', f'{folder}/1.jpg' in names and f'{folder}/2.jpg' in names)
+    with zipfile_mod.ZipFile(zip_path) as zf:
+        txt = zf.read(f'{folder}/文案.txt').decode('utf-8')
+    check('文案.txt 内容为 desc', txt == '这是文案内容')
+
+    # 无图笔记应被跳过
+    no_img = [{'note_id': 'a' * 24, 'title': '无图', 'desc': 'x', 'image_list': []}]
+    check('无图笔记返回 None', export_mod.export_note_folder(no_img[0], tmp) is None)
+
+
+# ---------- 5. AI 改写解析 ----------
+
+def test_ai_parse():
+    from desktop.ai_client import parse_rewrite_json
+
+    data = parse_rewrite_json('{"title": "新标题", "content": "新内容"}')
+    check('解析纯 JSON', data.get('title') == '新标题' and data.get('content') == '新内容')
+    data = parse_rewrite_json('好的，以下是改写结果：\n{"title": "T2", "content": "C2"}\n完毕')
+    check('解析夹带文字的 JSON', data.get('title') == 'T2')
+    data = parse_rewrite_json('模型抽风输出无 JSON')
+    check('解析失败返回空', data == {})
 
 
 if __name__ == '__main__':
     test_auth_client()
     test_gui()
     test_task_spec()
+    test_xiaolvsu_zip()
+    test_ai_parse()
     print()
     if FAILURES:
         print(f'自检失败 {len(FAILURES)} 项：{FAILURES}')

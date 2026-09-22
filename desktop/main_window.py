@@ -223,6 +223,21 @@ class _CheckWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class _AiTestWorker(QThread):
+    ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, client, parent=None):
+        super().__init__(parent)
+        self.client = client
+
+    def run(self):
+        try:
+            self.ok.emit(self.client.test())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: dict, session: dict):
         super().__init__()
@@ -458,18 +473,24 @@ class MainWindow(QMainWindow):
         out_label = QLabel('输出目录')
         out_label.setObjectName('mutedLabel')
         self.output_edit = QLineEdit(self.config.get('output_dir') or str(paths.DEFAULT_OUTPUT_DIR))
+        self.output_edit.setMinimumWidth(150)
         browse_btn = QPushButton('浏览')
         browse_btn.setObjectName('softBtn')
         browse_btn.clicked.connect(self.browse_output_dir)
         self.task_edit = QLineEdit()
-        self.task_edit.setPlaceholderText('任务名，留空自动生成')
-        self.task_edit.setFixedWidth(170)
+        self.task_edit.setPlaceholderText('任务名，可留空')
+        self.task_edit.setFixedWidth(130)
         self.img_check = QCheckBox('图片')
         self.img_check.setChecked(True)
         self.video_check = QCheckBox('视频')
         self.video_check.setChecked(True)
         self.excel_check = QCheckBox('Excel')
         self.excel_check.setChecked(True)
+        self.zip_check = QCheckBox('打包')
+        self.zip_check.setChecked(True)
+        self.zip_check.setToolTip('导出小绿书压缩包（图片+文案.txt），可直接上传 xiao 赛道管理')
+        self.ai_check = QCheckBox('AI改写')
+        self.ai_check.setToolTip('抓取后调用 AI 改写标题与文案（在设置页配置接口）')
         options_layout.addWidget(out_label)
         options_layout.addWidget(self.output_edit, 1)
         options_layout.addWidget(browse_btn)
@@ -479,6 +500,8 @@ class MainWindow(QMainWindow):
         options_layout.addWidget(self.img_check)
         options_layout.addWidget(self.video_check)
         options_layout.addWidget(self.excel_check)
+        options_layout.addWidget(self.zip_check)
+        options_layout.addWidget(self.ai_check)
         options_row.addWidget(options_card, 1)
 
         run_card = QFrame()
@@ -646,11 +669,14 @@ class MainWindow(QMainWindow):
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(22, 18, 22, 16)
+        outer.setSpacing(12)
+
+        # 基础设置卡
         card = QFrame()
         card.setObjectName('card')
         box = QVBoxLayout(card)
         box.setContentsMargins(18, 16, 18, 16)
-        title = QLabel('设置')
+        title = QLabel('基础')
         title.setObjectName('greetTitle')
         box.addWidget(title)
         form = QFormLayout()
@@ -677,9 +703,84 @@ class MainWindow(QMainWindow):
         clear_btn.clicked.connect(self.forget_xhs_session)
         form.addRow('小红书', clear_btn)
         box.addLayout(form)
-        box.addStretch(1)
-        outer.addWidget(card, 1)
+        outer.addWidget(card)
+
+        # AI 改写配置卡
+        ai_card = QFrame()
+        ai_card.setObjectName('card')
+        ai_box = QVBoxLayout(ai_card)
+        ai_box.setContentsMargins(18, 16, 18, 16)
+        ai_title = QLabel('AI 改写（OpenAI Responses 格式，兼容各类网关）')
+        ai_title.setObjectName('greetTitle')
+        ai_box.addWidget(ai_title)
+        ai_form = QFormLayout()
+        ai_form.setContentsMargins(0, 10, 0, 0)
+        ai_form.setSpacing(10)
+        self.ai_base_edit = QLineEdit(self.config.get('ai_base') or 'https://api.openai.com/v1')
+        self.ai_base_edit.setPlaceholderText('https://api.openai.com/v1')
+        self.ai_key_edit = QLineEdit(self.config.get('ai_key') or '')
+        self.ai_key_edit.setEchoMode(QLineEdit.Password)
+        self.ai_key_edit.setPlaceholderText('sk-…')
+        self.ai_model_edit = QLineEdit(self.config.get('ai_model') or 'gpt-4o-mini')
+        self.ai_prompt_edit = QPlainTextEdit(self.config.get('ai_prompt') or '')
+        self.ai_prompt_edit.setPlaceholderText(
+            '留空使用内置预设提示词（改写标题 20 字内 + 正文 150-250 字 + 话题标签，输出 JSON）'
+        )
+        self.ai_prompt_edit.setFixedHeight(110)
+        ai_form.addRow('接口地址', self.ai_base_edit)
+        ai_form.addRow('API Key', self.ai_key_edit)
+        ai_form.addRow('模型', self.ai_model_edit)
+        ai_form.addRow('提示词', self.ai_prompt_edit)
+        ai_box.addLayout(ai_form)
+        ai_btn_row = QHBoxLayout()
+        save_btn = QPushButton('保存配置')
+        save_btn.setObjectName('primaryBtn')
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self.save_ai_config)
+        self.ai_test_btn = QPushButton('测试连接')
+        self.ai_test_btn.setObjectName('softBtn')
+        self.ai_test_btn.setCursor(Qt.PointingHandCursor)
+        self.ai_test_btn.clicked.connect(self.test_ai_config)
+        self.ai_test_label = QLabel('')
+        self.ai_test_label.setObjectName('mutedLabel')
+        ai_btn_row.addWidget(save_btn)
+        ai_btn_row.addWidget(self.ai_test_btn)
+        ai_btn_row.addWidget(self.ai_test_label, 1)
+        ai_box.addLayout(ai_btn_row)
+        outer.addWidget(ai_card)
+        outer.addStretch(1)
         return page
+
+    def save_ai_config(self):
+        self.config['ai_base'] = self.ai_base_edit.text().strip() or 'https://api.openai.com/v1'
+        self.config['ai_key'] = self.ai_key_edit.text().strip()
+        self.config['ai_model'] = self.ai_model_edit.text().strip() or 'gpt-4o-mini'
+        self.config['ai_prompt'] = self.ai_prompt_edit.toPlainText().strip()
+        paths.save_config(self.config)
+        self.ai_test_label.setText('已保存')
+        self.append_log('AI 改写配置已保存')
+
+    def test_ai_config(self):
+        self.save_ai_config()
+        self.ai_test_btn.setEnabled(False)
+        self.ai_test_label.setText('测试中…')
+        from desktop.ai_client import AIClient
+        client = AIClient(
+            self.config.get('ai_base') or '', self.config.get('ai_key') or '',
+            self.config.get('ai_model') or '', self.config.get('ai_prompt') or '',
+        )
+        self._ai_test_worker = _AiTestWorker(client, self)
+        self._ai_test_worker.ok.connect(self._on_ai_test_ok)
+        self._ai_test_worker.failed.connect(self._on_ai_test_failed)
+        self._ai_test_worker.start()
+
+    def _on_ai_test_ok(self, sample: str):
+        self.ai_test_btn.setEnabled(True)
+        self.ai_test_label.setText(f'连接成功：{sample}…')
+
+    def _on_ai_test_failed(self, message: str):
+        self.ai_test_btn.setEnabled(True)
+        self.ai_test_label.setText(f'失败：{message}')
 
     def switch_page(self, key: int):
         for k, btn in self.nav_buttons.items():
@@ -760,10 +861,20 @@ class MainWindow(QMainWindow):
 
     def _current_spec(self) -> TaskSpec:
         index = self.tabs.currentIndex()
+        ai_cfg = {}
+        if self.ai_check.isChecked():
+            ai_cfg = {
+                'base': self.config.get('ai_base') or '',
+                'key': self.config.get('ai_key') or '',
+                'model': self.config.get('ai_model') or '',
+                'prompt': self.config.get('ai_prompt') or '',
+            }
         spec = TaskSpec(
             save_images=self.img_check.isChecked(),
             save_videos=self.video_check.isChecked(),
             save_excel=self.excel_check.isChecked(),
+            zip_export=self.zip_check.isChecked(),
+            ai_cfg=ai_cfg,
             task_name=self.task_edit.text().strip(),
             output_dir=self.output_edit.text().strip() or str(paths.DEFAULT_OUTPUT_DIR),
         )
@@ -800,8 +911,10 @@ class MainWindow(QMainWindow):
             return '请至少填写一个笔记链接'
         if not os.path.isdir(spec.output_dir):
             return '输出目录不存在，请重新选择'
-        if not (spec.save_images or spec.save_videos or spec.save_excel):
+        if not (spec.save_images or spec.save_videos or spec.save_excel or spec.zip_export):
             return '请至少选择一种保存内容'
+        if spec.ai_cfg and not spec.ai_cfg.get('key'):
+            return '已勾选 AI改写，请先在「设置」页配置 API Key'
         return ''
 
     def start_collection(self):
@@ -873,13 +986,14 @@ class MainWindow(QMainWindow):
             f"任务完成：抓取 {summary['got']}/{summary['total']} 篇，"
             f"用时 {summary['seconds']} 秒，输出目录 {summary['base_dir']}"
         )
+        zip_info = f"\n小绿书压缩包：{summary['zip']}" if summary.get('zip') else ''
         if summary['stopped']:
             QMessageBox.information(self, '已停止', f"任务已停止，共抓取 {summary['got']} 篇。")
         else:
             QMessageBox.information(
                 self, '采集完成',
                 f"抓取 {summary['got']}/{summary['total']} 篇\n"
-                f"用时 {summary['seconds']} 秒\n"
+                f"用时 {summary['seconds']} 秒{zip_info}\n"
                 f"输出目录：{summary['base_dir']}",
             )
 
@@ -948,7 +1062,14 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.collect_worker is not None and self.collect_worker.isRunning():
             self.collect_worker.stop()
-            self.collect_worker.wait(3000)
+        for worker in (
+            self.collect_worker,
+            self.restore_worker,
+            getattr(self, '_check_worker', None),
+            getattr(self, '_ai_test_worker', None),
+        ):
+            if worker is not None and worker.isRunning():
+                worker.wait(2500)
         try:
             if self._log_sink_id is not None:
                 logger.remove(self._log_sink_id)

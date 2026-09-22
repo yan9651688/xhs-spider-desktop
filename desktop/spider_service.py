@@ -25,6 +25,8 @@ class TaskSpec:
     save_images: bool = True
     save_videos: bool = True
     save_excel: bool = True
+    zip_export: bool = True         # 导出小绿书 zip（xiao 赛道上传格式）
+    ai_cfg: dict = field(default_factory=dict)   # 非空时抓取后逐篇 AI 改写
     task_name: str = ''
     output_dir: str = ''
 
@@ -98,6 +100,15 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
     emit.progress(0, total, '抓取')
     emit.log(f'共找到 {total} 篇笔记，开始逐条抓取')
 
+    ai_client = None
+    if spec.ai_cfg and spec.ai_cfg.get('key'):
+        from desktop.ai_client import AIClient
+        ai_client = AIClient(
+            spec.ai_cfg.get('base') or '', spec.ai_cfg.get('key') or '',
+            spec.ai_cfg.get('model') or '', spec.ai_cfg.get('prompt') or '',
+        )
+        emit.log(f"AI 改写已开启（模型：{ai_client.model}）")
+
     note_list = []
     for index, url in enumerate(urls, start=1):
         if should_stop():
@@ -108,6 +119,16 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
         except Exception as exc:
             success, msg, note_info = False, exc, None
         if success and note_info:
+            if ai_client is not None:
+                try:
+                    new_title, new_content = ai_client.rewrite(
+                        note_info.get('title') or '', note_info.get('desc') or '',
+                    )
+                    note_info['title_ai'] = new_title
+                    note_info['desc_ai'] = new_content
+                    emit.log(f"AI 改写完成（{index}/{total}）：{new_title[:24]}")
+                except Exception as exc:
+                    emit.log(f'AI 改写失败（{index}/{total}），保留原文：{exc}')
             note_list.append(note_info)
             emit.note(note_info)
         else:
@@ -120,6 +141,13 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
     excel_dir = os.path.join(base_dir, 'excel')
     os.makedirs(media_dir, exist_ok=True)
     os.makedirs(excel_dir, exist_ok=True)
+
+    zip_path = ''
+    if note_list and spec.zip_export:
+        from desktop.xhs_export import export_xiaolvsu_zip
+        zip_path = export_xiaolvsu_zip(
+            note_list, base_dir, spec.task_name, should_stop, emit,
+        ) or ''
 
     if note_list and spec.want_media:
         emit.progress(0, len(note_list), '保存媒体')
@@ -139,10 +167,14 @@ def run_collection(auth, spec: TaskSpec, should_stop, emit):
         save_to_xlsx(note_list, excel_path)
         emit.log(f'Excel 已保存：{excel_path}')
 
+    if note_list and not (spec.zip_export or spec.want_media or spec.save_excel):
+        emit.log('未选择任何保存方式，仅完成抓取')
+
     return {
         'total': total,
         'got': len(note_list),
         'excel': excel_path,
+        'zip': zip_path,
         'media_dir': media_dir if spec.want_media else '',
         'base_dir': base_dir,
         'seconds': round(time.time() - started, 1),
