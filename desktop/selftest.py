@@ -148,7 +148,7 @@ def test_gui():
         {'server': 'http://demo', 'username': 'alice', 'output_dir': os.getcwd()},
         {'token': 't', 'username': 'alice', 'name': 'Alice', 'xhsExpireTime': '永久'},
     )
-    check('主窗口构建（5 个采集页签）', window.tabs.count() == 5)
+    check('主窗口构建（6 个采集页签）', window.tabs.count() == 6)
     spec = window._current_spec()
     check('默认任务模式为 search', spec.mode == 'search' and spec.query == '')
     window.tabs.setCurrentIndex(1)
@@ -203,6 +203,28 @@ def test_gui():
     window.collect_kind_combo.setCurrentIndex(0)
     check('收藏模式任务名随类型变化',
           window._current_spec().task_name == '收藏abc123')
+    window.tabs.setCurrentIndex(0)
+
+    # 用户搜索页签：模式解析、校验、选项显隐
+    window.tabs.setCurrentIndex(5)
+    spec = window._current_spec()
+    check('用户搜索模式解析', spec.mode == 'usersearch' and spec.user_query == '')
+    check('用户搜索空关键词被拦截',
+          '关键词' in window._validate_spec(spec))
+    window.user_query_edit.setText('黄金首饰')
+    window.user_num_spin.setValue(30)
+    spec = window._current_spec()
+    check('用户搜索解析数量与关键词',
+          spec.require_num == 30 and spec.user_query == '黄金首饰')
+    window.excel_check.setChecked(True)
+    check('用户搜索校验通过', window._validate_spec(spec) == '')
+    check('用户搜索任务名带关键词', spec.task_name == '用户搜索黄金首饰')
+    check('用户搜索隐藏媒体选项',
+          window.img_check.isHidden() and not window.excel_check.isHidden())
+    window.excel_check.setChecked(False)
+    check('用户搜索未勾 Excel 被拦截',
+          '仅支持导出 Excel' in window._validate_spec(window._current_spec()))
+    window.excel_check.setChecked(True)
     window.tabs.setCurrentIndex(0)
     window.deleteLater()
     app.processEvents()
@@ -466,6 +488,132 @@ def test_collect_urls():
     check('like 模式调用赞过接口', api.called == 'like' and '/explore/l1' in urls[0])
 
 
+# ---------- 6c. 用户搜索 ----------
+
+def test_user_search():
+    import tempfile
+
+    from xhs_utils.data_util import handle_search_user_info
+
+    # 实测的搜索结果结构（2026-09-24 探测所得，含各字段的真实类型/取值）
+    RAW = {
+        'id': 'u123', 'name': '金饰小铺', 'image': 'http://a/x.jpg',
+        'red_id': 'abc123', 'sub_title': '小红书号：abc123',
+        'profession': '珠宝商',
+        'note_count': 128, 'fans': '5600',
+        'followed': False,                       # 布尔，不是关注数
+        'red_official_verified': True,
+        'live_info': {'status': 0, 'start_time': 0},  # 字典且永远非空
+        'link': 'xhsdiscover://1/user/user.u123',     # App 深链
+        'xsec_token': 'tk', 'is_self': False,
+    }
+    parsed = handle_search_user_info(RAW)
+    check('用户搜索字段映射正确',
+          parsed['nickname'] == '金饰小铺' and parsed['red_id'] == 'abc123'
+          and parsed['fans'] == '5600' and parsed['note_count'] == 128
+          and parsed['profession'] == '珠宝商')
+    check('用户搜索标注官方认证', parsed['verified'] == '是')
+
+    # 回归：live_info 是字典且永远非空，必须看 status 而非判空
+    check('live_info.status=0 时不算直播中', parsed['live'] == '')
+    live = dict(RAW, live_info={'status': 1, 'start_time': 123})
+    check('live_info.status=1 时标为直播中',
+          handle_search_user_info(live)['live'] == '直播中')
+
+    # 回归：主页 URL 必须是网页地址，不能是 App 深链
+    check('主页 URL 用 id 拼网页地址而非深链',
+          parsed['home_url'] == 'https://www.xiaohongshu.com/user/profile/u123')
+
+    # 回归：red_id 为空时从 sub_title「小红书号：xxx」解析
+    no_red = dict(RAW, red_id='', sub_title='小红书号：from_sub')
+    check('red_id 为空时从 sub_title 解析',
+          handle_search_user_info(no_red)['red_id'] == 'from_sub')
+
+    # 关注数/简介列已移除（搜索结果无此数据）
+    check('搜索结果不含关注数与简介字段',
+          'followed' not in parsed and 'sub_title' not in parsed)
+
+    # 缺字段不抛异常（搜索结果字段可能不全）
+    sparse = handle_search_user_info({'id': 'u9'})
+    check('用户搜索缺字段不抛异常',
+          sparse['nickname'] == '' and sparse['fans'] == '' and sparse['live'] == '')
+
+    # 兼容 handle_user_info 用的旧结构会 KeyError —— 固化这个差异
+    from xhs_utils.data_util import handle_user_info
+    try:
+        handle_user_info(RAW, 'u123')
+        old_raises = False
+    except KeyError:
+        old_raises = True
+    check('搜索结果不能喂给 handle_user_info（已知差异）', old_raises)
+
+    # 端到端：桩 api -> Excel
+    import apis.xhs_pc_apis as api_mod
+    import xhs_utils.xhs_pc as pc_mod
+    from desktop.spider_service import TaskSpec, run_user_search
+
+    class _StubApi:
+        """记录收到的 query —— 参数为空时返回 0 条，与真实接口行为一致。
+
+        这里刻意不屏蔽「关键词传空」这类 bug：真实接口收到空关键词会返回
+        0 个用户（不报错），如果桩永远返回固定数据，字段名写错就测不出来。
+        """
+
+        def __init__(self):
+            self.received = []
+
+        def bootstrap(self):
+            return self
+
+        def search_some_user(self, query, require_num, proxies=None):
+            self.received.append(query)
+            if not query:
+                return True, '成功', []
+            return True, '成功', [RAW, {'id': 'u2', 'name': '二号'}]
+
+    class _Emit:
+        def __init__(self):
+            self.logs = []
+
+        def log(self, text):
+            self.logs.append(str(text))
+
+        def progress(self, done, total, stage):
+            pass
+
+    tmp = tempfile.mkdtemp()
+    spec = TaskSpec(mode='usersearch', user_query='黄金首饰', require_num=10,
+                    output_dir=tmp, task_name='us1', save_excel=True)
+    emit = _Emit()
+    stub = _StubApi()
+    orig_auth, orig_api = pc_mod.XHSPcAuth, api_mod.XHS_Apis
+    pc_mod.XHSPcAuth = type('A', (), {'from_cookie': staticmethod(lambda c: object())})
+    api_mod.XHS_Apis = lambda auth: stub
+    try:
+        summary = run_user_search([{'cookie': 'x'}], spec, lambda: False, emit)
+    finally:
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = orig_auth, orig_api
+
+    # 回归：关键词必须取 spec.user_query（曾误写成 spec.query，导致静默 0 结果）
+    check('用户搜索把关键词传给接口（防字段名笔误）',
+          stub.received == ['黄金首饰'])
+
+    check('用户搜索生成 Excel',
+          summary['users'] == 2 and summary['excel'].endswith('us1.xlsx')
+          and os.path.exists(summary['excel']))
+    check('用户搜索 summary 带 users 字段',
+          'users' in summary and 'zip' not in summary)
+
+    # 表头应为搜索专用 12 列，而非 handle_user_info 的旧表头
+    import openpyxl
+    wb = openpyxl.load_workbook(summary['excel'])
+    header = [c.value for c in wb.active[1]]
+    check('用户搜索 Excel 表头为搜索专用列',
+          '职业/认证' in header and '作品数量' in header
+          and '性别' not in header and '关注数量' not in header
+          and '简介' not in header)
+
+
 # ---------- 6. 类型过滤 ----------
 
 def test_should_collect():
@@ -497,6 +645,7 @@ if __name__ == '__main__':
     test_ai_parse()
     test_comment_collection()
     test_collect_urls()
+    test_user_search()
     test_should_collect()
     print()
     if FAILURES:

@@ -17,7 +17,7 @@ from loguru import logger
 
 @dataclass
 class TaskSpec:
-    mode: str = 'search'            # search / urls / user / comments / collect
+    mode: str = 'search'            # search / urls / user / comments / collect / usersearch
     query: str = ''
     require_num: int = 20
     sort_type: int = 0              # 0 综合 1 最新 2 最多点赞 3 最多评论 4 最多收藏
@@ -27,6 +27,7 @@ class TaskSpec:
     user_url: str = ''
     comment_urls: list = field(default_factory=list)   # 评论采集：笔记链接列表
     collect_kind: str = 'collect'   # 收藏采集：collect=收藏 / like=赞过
+    user_query: str = ''            # 用户搜索：关键词
     save_images: bool = True
     save_videos: bool = True
     save_excel: bool = True
@@ -165,6 +166,87 @@ def _spider_comments(api, url: str):
         except Exception as exc:
             logger.debug(f'评论字段解析跳过一条：{exc}')
     return True, msg, comments
+
+
+def run_user_search(cookies: list, spec: TaskSpec, should_stop, emit):
+    """用户搜索：按关键词搜账号 -> 导出 Excel。
+
+    与笔记类采集不同：不逐条抓详情、不下载媒体，一次搜索即出结果。
+    因此不需要逐条限速，只在翻页之间留间隔。
+    """
+    from xhs_utils.data_util import handle_search_user_info, save_to_xlsx
+    from xhs_utils.xhs_pc import XHSPcAuth
+    from apis.xhs_pc_apis import XHS_Apis
+
+    started = time.time()
+
+    emit.log(f'正在建立 {len(cookies)} 个小红书账号会话…')
+    api = None
+    for i, cookie in enumerate(cookies, start=1):
+        if should_stop():
+            return {'total': 0, 'got': 0, 'excel': '', 'base_dir': '',
+                    'seconds': 0, 'stopped': True}
+        try:
+            auth = XHSPcAuth.from_cookie(cookie)
+            candidate = XHS_Apis(auth).bootstrap()
+            api = candidate
+            emit.log(f'小红书账号 {i} 会话有效')
+            break
+        except Exception as exc:
+            emit.log(f'小红书账号 {i} Cookie 已失效，跳过：{str(exc)[:60]}')
+        _throttle(1.0, should_stop)
+    if api is None:
+        raise RuntimeError('没有可用的小红书账号，请重新扫码登录')
+
+    emit.progress(0, 1, '搜索用户')
+    emit.log(f'搜索关键词：{spec.user_query}（目标 {spec.require_num} 个用户）')
+    try:
+        success, msg, users = api.search_some_user(spec.user_query, spec.require_num)
+    except Exception as exc:
+        success, msg, users = False, exc, None
+    if not success:
+        detail = str(msg)
+        if any(k in detail for k in RISK_KEYWORDS):
+            raise RuntimeError(f'搜索触发风控，请稍后重试或调大采集间隔：{detail}')
+        raise RuntimeError(f'搜索用户失败：{detail}')
+
+    users = users or []
+    emit.log(f'搜索到 {len(users)} 个用户')
+    emit.progress(1, 1, '搜索用户')
+
+    parsed = []
+    skipped = 0
+    for raw in users:
+        try:
+            parsed.append(handle_search_user_info(raw))
+        except Exception as exc:
+            skipped += 1
+            logger.debug(f'用户字段解析跳过一条：{exc}')
+    if skipped:
+        emit.log(f'有 {skipped} 条用户数据字段异常，已跳过')
+
+    task_name = sanitize_name(spec.task_name)
+    base_dir = os.path.join(spec.output_dir, task_name)
+    excel_dir = os.path.join(base_dir, 'excel')
+    os.makedirs(excel_dir, exist_ok=True)
+
+    excel_path = ''
+    if parsed:
+        excel_path = os.path.join(excel_dir, f'{task_name}.xlsx')
+        save_to_xlsx(parsed, excel_path, 'search_user')
+        emit.log(f'Excel 已保存：{excel_path}（{len(parsed)} 个用户）')
+    else:
+        emit.log('没有搜索到用户，未生成 Excel')
+
+    return {
+        'total': len(users),
+        'got': len(parsed),
+        'users': len(parsed),
+        'excel': excel_path,
+        'base_dir': base_dir,
+        'seconds': round(time.time() - started, 1),
+        'stopped': should_stop(),
+    }
 
 
 def run_comment_collection(cookies: list, spec: TaskSpec, should_stop, emit):

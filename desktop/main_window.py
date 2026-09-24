@@ -39,7 +39,12 @@ from PySide6.QtWidgets import (
 
 from desktop import paths
 from desktop.auth_client import AuthClient, AuthError
-from desktop.spider_service import TaskSpec, run_collection, run_comment_collection
+from desktop.spider_service import (
+    TaskSpec,
+    run_collection,
+    run_comment_collection,
+    run_user_search,
+)
 from desktop.xhs_login_dialog import XhsLoginDialog
 
 SORT_OPTIONS = [('综合排序', 0), ('最新', 1), ('最多点赞', 2), ('最多评论', 3), ('最多收藏', 4)]
@@ -195,6 +200,9 @@ class _CollectWorker(QThread):
         try:
             if self.spec.mode == 'comments':
                 summary = run_comment_collection(
+                    self.cookies, self.spec, lambda: self._stop, emit)
+            elif self.spec.mode == 'usersearch':
+                summary = run_user_search(
                     self.cookies, self.spec, lambda: self._stop, emit)
             else:
                 summary = run_collection(self.cookies, self.spec,
@@ -476,6 +484,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_user_tab(), '主页采集')
         self.tabs.addTab(self._build_comments_tab(), '评论采集')
         self.tabs.addTab(self._build_collect_tab(), '收藏采集')
+        self.tabs.addTab(self._build_usersearch_tab(), '用户搜索')
         self.tabs.currentChanged.connect(self._sync_option_visibility)
         card_layout.addWidget(self.tabs)
         outer.addWidget(collect_card, 1)
@@ -608,15 +617,15 @@ class MainWindow(QMainWindow):
         return page
 
     def _sync_option_visibility(self, index: int = None):
-        """评论采集页只保留「Excel」选项；其余页签显示全部（默认行为不变）。"""
+        """评论/用户搜索页只保留「Excel」选项；其余页签显示全部（默认行为不变）。"""
         if index is None:
             index = self.tabs.currentIndex()
-        # 页签顺序：0 搜索 1 链接 2 主页 3 评论 4 收藏
-        is_comments = index == 3
+        # 页签顺序：0 搜索 1 链接 2 主页 3 评论 4 收藏 5 用户搜索
+        excel_only = index in (3, 5)
         for widget in getattr(self, 'media_option_widgets', []):
-            widget.setVisible(not is_comments)
+            widget.setVisible(not excel_only)
         if hasattr(self, 'content_label'):
-            self.content_label.setText('保存内容' if not is_comments else '保存内容（评论仅支持 Excel）')
+            self.content_label.setText('保存内容' if not excel_only else '保存内容（仅支持 Excel）')
 
     def _stat_card(self, parent_layout, object_name: str, label: str, value: str) -> QLabel:
         card = QFrame()
@@ -735,6 +744,32 @@ class MainWindow(QMainWindow):
         hint = QLabel('采集该用户公开的收藏 / 赞过笔记（对方未公开则可能为空）。')
         hint.setObjectName('mutedLabel')
         form.addRow('', hint)
+        return tab
+
+    def _build_usersearch_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 0, 16, 0)
+        layout.addStretch(1)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        kw_label = QLabel('关键词')
+        self.user_query_edit = QLineEdit()
+        self.user_query_edit.setPlaceholderText('搜索用户，例如：黄金首饰 博主')
+        num_label = QLabel('数量')
+        self.user_num_spin = QSpinBox()
+        self.user_num_spin.setRange(1, 200)
+        self.user_num_spin.setValue(20)
+        self.user_num_spin.setFixedWidth(76)
+        row.addWidget(kw_label)
+        row.addWidget(self.user_query_edit, 1)
+        row.addWidget(num_label)
+        row.addWidget(self.user_num_spin)
+        layout.addLayout(row)
+        hint = QLabel('按关键词搜索账号，结果导出 Excel（粉丝数/作品数/职业认证等）。')
+        hint.setObjectName('mutedLabel')
+        layout.addWidget(hint)
+        layout.addStretch(1)
         return tab
 
     # ---------- 矩阵占位页 ----------
@@ -1079,6 +1114,12 @@ class MainWindow(QMainWindow):
                 tail = spec.user_url.split('/')[-1].split('?')[0]
                 prefix = '赞过' if spec.collect_kind == 'like' else '收藏'
                 spec.task_name = f'{prefix}{tail}' if tail else f'{prefix}采集'
+        elif index == 5:
+            spec.mode = 'usersearch'
+            spec.user_query = self.user_query_edit.text().strip()
+            spec.require_num = self.user_num_spin.value()
+            if not spec.task_name:
+                spec.task_name = f'用户搜索{spec.user_query}' if spec.user_query else '用户搜索'
         return spec
 
     def _validate_spec(self, spec: TaskSpec) -> str:
@@ -1092,6 +1133,11 @@ class MainWindow(QMainWindow):
             return '请输入用户主页链接'
         if spec.mode == 'collect' and not spec.user_url:
             return '请输入用户主页链接'
+        if spec.mode == 'usersearch':
+            if not spec.user_query:
+                return '请输入搜索关键词'
+            if not spec.save_excel:
+                return '用户搜索仅支持导出 Excel，请勾选「Excel」'
         if spec.mode == 'urls' and not spec.note_urls:
             return '请至少填写一个笔记链接'
         if spec.mode == 'comments':
@@ -1101,8 +1147,9 @@ class MainWindow(QMainWindow):
                 return '评论采集仅支持导出 Excel，请勾选「Excel」'
         if not os.path.isdir(spec.output_dir):
             return '输出目录不存在，请重新选择'
-        if spec.mode != 'comments' and not (spec.save_images or spec.save_videos
-                                            or spec.save_excel or spec.zip_export):
+        if spec.mode not in ('comments', 'usersearch') and not (
+                spec.save_images or spec.save_videos
+                or spec.save_excel or spec.zip_export):
             return '请至少选择一种保存内容'
         if spec.ai_cfg and not spec.ai_cfg.get('key'):
             return '已勾选 AI改写，请先在「设置」页配置 API Key'
@@ -1174,6 +1221,23 @@ class MainWindow(QMainWindow):
     def on_done(self, summary: dict):
         self._finish_run()
         self.stage_label.setText('完成')
+        if 'users' in summary:
+            self.stat_count.setText(f"{summary['users']} 个")
+            self.append_log(
+                f"任务完成：搜索到 {summary['users']} 个用户，"
+                f"用时 {summary['seconds']} 秒"
+            )
+            if summary['stopped']:
+                QMessageBox.information(
+                    self, '已停止', f"任务已停止，共 {summary['users']} 个用户。")
+            else:
+                QMessageBox.information(
+                    self, '搜索完成',
+                    f"搜索到 {summary['users']} 个用户\n"
+                    f"用时 {summary['seconds']} 秒\n"
+                    f"输出目录：{summary['base_dir']}",
+                )
+            return
         if 'comments' in summary:
             self.stat_count.setText(f"{summary['comments']} 条")
             self.append_log(

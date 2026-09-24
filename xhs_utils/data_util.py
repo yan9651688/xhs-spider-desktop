@@ -27,6 +27,56 @@ def timestamp_to_str(timestamp):
     dt = time.strftime("%Y-%m-%d %H:%M:%S", time_local)
     return dt
 
+def handle_search_user_info(data):
+    """搜索结果里的用户对象 -> 标准结构。
+
+    注意：与 handle_user_info 用的**不是同一套接口**。用户搜索走
+    /api/sns/web/v1/search/usersearch，返回扁平结构，没有 basic_info /
+    interactions / tags，字段名也不同（name 而非 nickname、image 而非 imageb）。
+    实测（2026-09-24）顶层键：
+      fans, followed, id, image, is_self, link, live_info, name, note_count,
+      profession, red_id, red_official_verified, red_official_verify_type,
+      show_red_official_verify_icon, sub_title, update_time, vshow, xsec_token
+
+    搜索结果**拿不到** IP 属地 / 获赞与收藏数 / 标签 / 关注数 / 个人简介 ——
+    这些只在用户详情接口有。要完整画像需对目标账号再跑一次主页采集。
+
+    几个容易误用的字段（实测确认，勿凭字段名猜语义）：
+      followed  —— **布尔值**，表示「我是否关注了他」，不是关注数
+      live_info —— 字典且**永远非空**，直播状态看 `status`（0=未直播）
+      sub_title —— 装的是「小红书号：xxx」，不是简介
+      link      —— App 深链（xhsdiscover://...），不是网页地址
+    """
+    user_id = str(data.get('id') or data.get('user_id') or '')
+    home_url = (f'https://www.xiaohongshu.com/user/profile/{user_id}'
+                if user_id else '')
+
+    # 小红书号：red_id 优先，为空时从 sub_title「小红书号：xxx」里取
+    red_id = str(data.get('red_id') or '').strip()
+    if not red_id:
+        sub = str(data.get('sub_title') or '')
+        if '：' in sub:
+            red_id = sub.split('：', 1)[1].strip()
+        elif ':' in sub:
+            red_id = sub.split(':', 1)[1].strip()
+
+    live_info = data.get('live_info') or {}
+    live_status = live_info.get('status') if isinstance(live_info, dict) else 0
+
+    return {
+        'user_id': user_id,
+        'home_url': home_url,
+        'nickname': data.get('name') or '',
+        'avatar': data.get('image') or '',
+        'red_id': red_id,
+        'profession': data.get('profession') or '',
+        'note_count': data.get('note_count') if data.get('note_count') is not None else '',
+        'fans': data.get('fans') or '',
+        'verified': '是' if data.get('red_official_verified') else '',
+        'live': '直播中' if live_status else '',
+    }
+
+
 def handle_user_info(data, user_id):
     home_url = f'https://www.xiaohongshu.com/user/profile/{user_id}'
     nickname = data['basic_info']['nickname']
@@ -193,11 +243,14 @@ def save_to_xlsx(datas, file_path, type='note'):
         headers = ['笔记id', '笔记url', '笔记类型', '用户id', '用户主页url', '昵称', '头像url', '标题', '描述', '点赞数量', '收藏数量', '评论数量', '分享数量', '视频封面url', '视频地址url', '图片地址url列表', '标签', '上传时间', 'ip归属地']
     elif type == 'user':
         headers = ['用户id', '用户主页url', '用户名', '头像url', '小红书号', '性别', 'ip地址', '介绍', '关注数量', '粉丝数量', '作品被赞和收藏数量', '标签']
+    elif type == 'search_user':
+        headers = ['用户id', '用户主页url', '用户名', '头像url', '小红书号', '职业/认证', '作品数量', '粉丝数量', '官方认证', '直播状态']
     else:
         headers = ['笔记id', '笔记url', '评论id', '用户id', '用户主页url', '昵称', '头像url', '评论内容', '评论标签', '点赞数量', '上传时间', 'ip归属地', '图片地址url列表']
     field_keys = {
         'note': ['note_id', 'note_url', 'note_type', 'user_id', 'home_url', 'nickname', 'avatar', 'title', 'desc', 'liked_count', 'collected_count', 'comment_count', 'share_count', 'video_cover', 'video_addr', 'image_list', 'tags', 'upload_time', 'ip_location'],
         'user': ['user_id', 'home_url', 'nickname', 'avatar', 'red_id', 'gender', 'ip_location', 'desc', 'follows', 'fans', 'interaction', 'tags'],
+        'search_user': ['user_id', 'home_url', 'nickname', 'avatar', 'red_id', 'profession', 'note_count', 'fans', 'verified', 'live'],
         'comment': ['note_id', 'note_url', 'comment_id', 'user_id', 'home_url', 'nickname', 'avatar', 'content', 'show_tags', 'like_count', 'upload_time', 'ip_location', 'pictures'],
     }
     keys = field_keys.get(type, field_keys['comment'])
