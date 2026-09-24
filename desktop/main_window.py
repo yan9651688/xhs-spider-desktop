@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from desktop import paths
 from desktop.auth_client import AuthClient, AuthError
-from desktop.spider_service import TaskSpec, run_collection
+from desktop.spider_service import TaskSpec, run_collection, run_comment_collection
 from desktop.xhs_login_dialog import XhsLoginDialog
 
 SORT_OPTIONS = [('综合排序', 0), ('最新', 1), ('最多点赞', 2), ('最多评论', 3), ('最多收藏', 4)]
@@ -193,7 +193,12 @@ class _CollectWorker(QThread):
     def run(self):
         emit = self._Emit(self)
         try:
-            summary = run_collection(self.cookies, self.spec, lambda: self._stop, emit)
+            if self.spec.mode == 'comments':
+                summary = run_comment_collection(
+                    self.cookies, self.spec, lambda: self._stop, emit)
+            else:
+                summary = run_collection(self.cookies, self.spec,
+                                         lambda: self._stop, emit)
             self.done.emit(summary)
         except Exception as exc:
             logger.exception('采集任务异常')
@@ -469,6 +474,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_search_tab(), '搜索采集')
         self.tabs.addTab(self._build_urls_tab(), '链接采集')
         self.tabs.addTab(self._build_user_tab(), '主页采集')
+        self.tabs.addTab(self._build_comments_tab(), '评论采集')
+        self.tabs.currentChanged.connect(self._sync_option_visibility)
         card_layout.addWidget(self.tabs)
         outer.addWidget(collect_card, 1)
 
@@ -523,6 +530,10 @@ class MainWindow(QMainWindow):
                   self.zip_check, self.ai_check):
             checks_row.addWidget(w)
         checks_row.addStretch(1)
+        # 评论采集没有媒体/无打包意义，也不走图文 AI 改写：切页签时隐藏这些选项
+        self.media_option_widgets = [self.img_check, self.video_check,
+                                     self.zip_check, self.ai_check]
+        self.content_label = content_label
         grid.addWidget(content_label, 2, 0)
         grid.addLayout(checks_row, 2, 1, 1, 3)
         grid.setColumnStretch(1, 3)
@@ -592,7 +603,18 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_view, 1)
         bottom.addWidget(log_card)
         outer.addLayout(bottom, 1)
+        self._sync_option_visibility()
         return page
+
+    def _sync_option_visibility(self, index: int = None):
+        """评论采集页只保留「Excel」选项；其余页签显示全部（默认行为不变）。"""
+        if index is None:
+            index = self.tabs.currentIndex()
+        is_comments = index == 3
+        for widget in getattr(self, 'media_option_widgets', []):
+            widget.setVisible(not is_comments)
+        if hasattr(self, 'content_label'):
+            self.content_label.setText('保存内容' if not is_comments else '保存内容（评论仅支持 Excel）')
 
     def _stat_card(self, parent_layout, object_name: str, label: str, value: str) -> QLabel:
         card = QFrame()
@@ -676,6 +698,22 @@ class MainWindow(QMainWindow):
         hint = QLabel('将采集该用户公开可见的全部笔记。')
         hint.setObjectName('mutedLabel')
         form.addRow('', hint)
+        return tab
+
+    def _build_comments_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 14, 12, 10)
+        layout.setSpacing(8)
+        self.comments_edit = QPlainTextEdit()
+        self.comments_edit.setPlaceholderText(
+            '每行一个笔记链接，例如：\n'
+            'https://www.xiaohongshu.com/explore/xxxxxxxx?xsec_token=...&xsec_source=pc_search'
+        )
+        layout.addWidget(self.comments_edit)
+        hint = QLabel('采集每篇笔记的一级评论，结果导出为 Excel（评论内容/评论者/点赞/IP 属地/时间）。')
+        hint.setObjectName('mutedLabel')
+        layout.addWidget(hint)
         return tab
 
     # ---------- 矩阵占位页 ----------
@@ -1001,12 +1039,17 @@ class MainWindow(QMainWindow):
             spec.note_urls = self.urls_edit.toPlainText().splitlines()
             if not spec.task_name:
                 spec.task_name = '链接采集'
-        else:
+        elif index == 2:
             spec.mode = 'user'
             spec.user_url = self.user_edit.text().strip()
             if not spec.task_name:
                 tail = spec.user_url.split('/')[-1].split('?')[0]
                 spec.task_name = f'用户{tail}' if tail else '主页采集'
+        elif index == 3:
+            spec.mode = 'comments'
+            spec.comment_urls = self.comments_edit.toPlainText().splitlines()
+            if not spec.task_name:
+                spec.task_name = '评论采集'
         return spec
 
     def _validate_spec(self, spec: TaskSpec) -> str:
@@ -1020,9 +1063,15 @@ class MainWindow(QMainWindow):
             return '请输入用户主页链接'
         if spec.mode == 'urls' and not spec.note_urls:
             return '请至少填写一个笔记链接'
+        if spec.mode == 'comments':
+            if not [u for u in spec.comment_urls if u.strip()]:
+                return '请至少填写一个笔记链接'
+            if not spec.save_excel:
+                return '评论采集仅支持导出 Excel，请勾选「Excel」'
         if not os.path.isdir(spec.output_dir):
             return '输出目录不存在，请重新选择'
-        if not (spec.save_images or spec.save_videos or spec.save_excel or spec.zip_export):
+        if spec.mode != 'comments' and not (spec.save_images or spec.save_videos
+                                            or spec.save_excel or spec.zip_export):
             return '请至少选择一种保存内容'
         if spec.ai_cfg and not spec.ai_cfg.get('key'):
             return '已勾选 AI改写，请先在「设置」页配置 API Key'
@@ -1094,6 +1143,25 @@ class MainWindow(QMainWindow):
     def on_done(self, summary: dict):
         self._finish_run()
         self.stage_label.setText('完成')
+        if 'comments' in summary:
+            self.stat_count.setText(f"{summary['comments']} 条")
+            self.append_log(
+                f"任务完成：{summary['got']}/{summary['total']} 篇笔记，"
+                f"共 {summary['comments']} 条评论，用时 {summary['seconds']} 秒"
+            )
+            if summary['stopped']:
+                QMessageBox.information(
+                    self, '已停止',
+                    f"任务已停止，共抓取 {summary['got']} 篇笔记、{summary['comments']} 条评论。")
+            else:
+                QMessageBox.information(
+                    self, '采集完成',
+                    f"抓取 {summary['got']}/{summary['total']} 篇笔记\n"
+                    f"共 {summary['comments']} 条评论\n"
+                    f"用时 {summary['seconds']} 秒\n"
+                    f"输出目录：{summary['base_dir']}",
+                )
+            return
         self.append_log(
             f"任务完成：抓取 {summary['got']}/{summary['total']} 篇，"
             f"用时 {summary['seconds']} 秒，输出目录 {summary['base_dir']}"

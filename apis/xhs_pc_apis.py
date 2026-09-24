@@ -1202,10 +1202,13 @@ class XHS_Apis():
             msg = _log_api_error(e)
         return success, msg, comment
 
-    def get_note_all_comment(self, url: str, proxies: dict = None):
+    def get_note_all_comment(self, url: str, proxies: dict = None, with_inner: bool = True):
         """
             获取一篇文章的所有评论
-            :param note_id: 你想要获取的笔记的id
+            :param url: 笔记完整链接（含 xsec_token）
+            :param with_inner: 是否逐条展开二级评论（楼中楼）。默认 True 保持原行为；
+                               False 时只取一级评论，可显著减少请求数（爆款笔记的
+                               楼中楼会放大出几十次额外请求，风控风险高）。
             返回一篇文章的所有评论
         """
         out_comment_list = []
@@ -1217,10 +1220,15 @@ class XHS_Apis():
             success, msg, out_comment_list = self.get_note_all_out_comment(note_id, xsec_token, proxies)
             if not success:
                 raise Exception(msg)
+            if with_inner:
+                for comment in out_comment_list:
+                    success, msg, new_comment = self.get_note_all_inner_comment(comment, xsec_token, proxies)
+                    if not success:
+                        raise Exception(msg)
+            # 评论对象本身不带笔记链接，这里补上，供 handle_comment_info 落表
             for comment in out_comment_list:
-                success, msg, new_comment = self.get_note_all_inner_comment(comment, xsec_token, proxies)
-                if not success:
-                    raise Exception(msg)
+                comment.setdefault('note_url', url)
+                comment.setdefault('note_id', note_id)
         except Exception as e:
             success = False
             msg = _log_api_error(e)

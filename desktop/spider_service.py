@@ -12,10 +12,12 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from loguru import logger
+
 
 @dataclass
 class TaskSpec:
-    mode: str = 'search'            # search / urls / user
+    mode: str = 'search'            # search / urls / user / comments
     query: str = ''
     require_num: int = 20
     sort_type: int = 0              # 0 综合 1 最新 2 最多点赞 3 最多评论 4 最多收藏
@@ -23,6 +25,7 @@ class TaskSpec:
     note_time: int = 0              # 0 不限 1 一天内 2 一周内 3 半年内
     note_urls: list = field(default_factory=list)
     user_url: str = ''
+    comment_urls: list = field(default_factory=list)   # 评论采集：笔记链接列表
     save_images: bool = True
     save_videos: bool = True
     save_excel: bool = True
@@ -110,6 +113,124 @@ def _spider_note(api, url: str):
         return success, msg, None
     except Exception as exc:
         return False, exc, None
+
+
+def _spider_comments(api, url: str):
+    """单篇笔记的一级评论抓取（不展开楼中楼，减少请求数）。"""
+    from xhs_utils.data_util import handle_comment_info
+
+    success, msg, raw_list = api.get_note_all_comment(url, with_inner=False)
+    if not success:
+        return False, msg, None
+    comments = []
+    for raw in raw_list:
+        try:
+            comments.append(handle_comment_info(raw))
+        except Exception as exc:
+            logger.debug(f'评论字段解析跳过一条：{exc}')
+    return True, msg, comments
+
+
+def run_comment_collection(cookies: list, spec: TaskSpec, should_stop, emit):
+    """评论采集：逐篇笔记抓一级评论 -> 导出 Excel。
+
+    与 run_collection 分开实现：评论没有媒体文件、不进小绿书 zip，
+    因此导出阶段差异过大，不适合复用。
+    多账号轮询、限速抖动、风控冷却/熔断的写法与 run_collection 保持一致。
+    """
+    from xhs_utils.data_util import save_to_xlsx
+    from xhs_utils.xhs_pc import XHSPcAuth
+    from apis.xhs_pc_apis import XHS_Apis
+
+    started = time.time()
+
+    emit.log(f'正在建立 {len(cookies)} 个小红书账号会话…')
+    apis_list = []
+    for i, cookie in enumerate(cookies, start=1):
+        if should_stop():
+            return {'total': 0, 'got': 0, 'comments': 0, 'excel': '',
+                    'base_dir': '', 'seconds': 0, 'stopped': True}
+        try:
+            auth = XHSPcAuth.from_cookie(cookie)
+            apis_list.append(XHS_Apis(auth))
+            emit.log(f'小红书账号 {i} 会话有效')
+        except Exception as exc:
+            emit.log(f'小红书账号 {i} Cookie 已失效，跳过：{str(exc)[:60]}')
+        _throttle(1.0, should_stop)
+    if not apis_list:
+        raise RuntimeError('没有可用的小红书账号，请重新扫码登录')
+    emit.log(f'{len(apis_list)} 个账号参与轮询采集，分摊请求频率')
+
+    urls = [u.strip() for u in spec.comment_urls if u.strip()]
+    total = len(urls)
+    emit.progress(0, total, '抓取评论')
+    emit.log(f'共 {total} 篇笔记，开始逐篇抓取一级评论')
+    if spec.delay_seconds > 0:
+        emit.log(f'防风控限速已开启：每篇间隔约 {spec.delay_seconds:g} 秒')
+    else:
+        emit.log('警告：未开启限速，高频采集容易触发小红书风控')
+
+    all_comments = []
+    ok_notes = 0
+    consecutive_risk = 0
+    for index, url in enumerate(urls, start=1):
+        if should_stop():
+            emit.log('任务已被用户停止，开始保存已采集的结果…')
+            break
+        api_i = apis_list[(index - 1) % len(apis_list)]
+        try:
+            success, msg, comments = _spider_comments(api_i, url)
+        except Exception as exc:
+            success, msg, comments = False, exc, None
+        if success:
+            consecutive_risk = 0
+            ok_notes += 1
+            all_comments.extend(comments or [])
+            emit.log(f'评论抓取完成（{index}/{total}）：{len(comments or [])} 条')
+        else:
+            detail = str(msg)
+            emit.log(f'评论抓取失败（{index}/{total}）：{msg}')
+            if any(k in detail for k in RISK_KEYWORDS):
+                consecutive_risk += 1
+                if consecutive_risk >= RISK_MAX_CONSECUTIVE:
+                    emit.log(
+                        f'连续 {RISK_MAX_CONSECUTIVE} 次触发风控，任务已自动停止。'
+                        '建议等待 30 分钟、调大采集间隔或增加小红书账号后再试'
+                    )
+                    break
+                emit.log(
+                    f'疑似触发风控限流，冷却 {RISK_COOLDOWN_SECONDS} 秒减少调用后继续'
+                    f'（连续第 {consecutive_risk} 次，累计 {RISK_MAX_CONSECUTIVE} 次自动停止）'
+                )
+                _throttle(RISK_COOLDOWN_SECONDS, should_stop)
+            else:
+                consecutive_risk = 0
+        emit.progress(index, total, '抓取评论')
+        if index < total:
+            _throttle(spec.delay_seconds, should_stop)
+
+    task_name = sanitize_name(spec.task_name)
+    base_dir = os.path.join(spec.output_dir, task_name)
+    excel_dir = os.path.join(base_dir, 'excel')
+    os.makedirs(excel_dir, exist_ok=True)
+
+    excel_path = ''
+    if all_comments:
+        excel_path = os.path.join(excel_dir, f'{task_name}_评论.xlsx')
+        save_to_xlsx(all_comments, excel_path, 'comment')
+        emit.log(f'评论 Excel 已保存：{excel_path}（{len(all_comments)} 条）')
+    else:
+        emit.log('未抓到任何评论，未生成 Excel')
+
+    return {
+        'total': total,
+        'got': ok_notes,
+        'comments': len(all_comments),
+        'excel': excel_path,
+        'base_dir': base_dir,
+        'seconds': round(time.time() - started, 1),
+        'stopped': should_stop(),
+    }
 
 
 def _should_collect(note_info: dict, spec: TaskSpec) -> bool:

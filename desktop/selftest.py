@@ -148,7 +148,7 @@ def test_gui():
         {'server': 'http://demo', 'username': 'alice', 'output_dir': os.getcwd()},
         {'token': 't', 'username': 'alice', 'name': 'Alice', 'xhsExpireTime': '永久'},
     )
-    check('主窗口构建（3 个采集页签）', window.tabs.count() == 3)
+    check('主窗口构建（4 个采集页签）', window.tabs.count() == 4)
     spec = window._current_spec()
     check('默认任务模式为 search', spec.mode == 'search' and spec.query == '')
     window.tabs.setCurrentIndex(1)
@@ -159,6 +159,30 @@ def test_gui():
     check('链接模式校验通过', window._validate_spec(spec) == '')
     window.tabs.setCurrentIndex(0)
     check('搜索模式缺关键词被拦截', '关键词' in window._validate_spec(window._current_spec()))
+
+    # 评论采集页签：模式解析、校验、选项显隐
+    window.tabs.setCurrentIndex(3)
+    check('评论模式解析 URL 列表',
+          window._current_spec().mode == 'comments'
+          and window._current_spec().comment_urls == [])
+    check('评论模式空链接被拦截',
+          '笔记链接' in window._validate_spec(window._current_spec()))
+    window.comments_edit.setPlainText('https://www.xiaohongshu.com/explore/abc?xsec_token=x')
+    window.excel_check.setChecked(True)
+    check('评论模式校验通过', window._validate_spec(window._current_spec()) == '')
+    # 窗口未 show()，isVisible() 恒为 False，这里用 isHidden() 判断显式显隐
+    check('评论模式隐藏媒体/打包/AI 选项',
+          window.img_check.isHidden() and window.video_check.isHidden()
+          and window.zip_check.isHidden() and window.ai_check.isHidden()
+          and not window.excel_check.isHidden())
+    window.excel_check.setChecked(False)
+    check('评论模式未勾 Excel 被拦截',
+          '仅支持导出 Excel' in window._validate_spec(window._current_spec()))
+    window.excel_check.setChecked(True)
+    window.tabs.setCurrentIndex(0)
+    check('切回搜索页恢复媒体选项',
+          not window.img_check.isHidden() and not window.zip_check.isHidden()
+          and not window.ai_check.isHidden())
     window.deleteLater()
     app.processEvents()
 
@@ -258,6 +282,119 @@ def test_ai_parse():
     check('解析失败返回空', data == {})
 
 
+# ---------- 6b. 评论采集 ----------
+
+def test_comment_collection():
+    import tempfile
+
+    from desktop.spider_service import TaskSpec, run_comment_collection
+
+    RAW_COMMENT = {
+        'id': 'cmt1',
+        'note_id': 'note1',
+        'user_info': {'user_id': 'u1', 'nickname': '小红', 'image': 'http://a/x.jpg'},
+        'content': '这个真好看',
+        'show_tags': [],
+        'like_count': '3',
+        'create_time': 1715518180000,
+        'ip_location': '上海',
+    }
+
+    class _StubApi:
+        """模拟 XHS_Apis：只实现评论采集用到的方法。"""
+
+        def __init__(self, fail=False):
+            self.fail = fail
+            self.calls = []
+
+        def get_note_all_comment(self, url, proxies=None, with_inner=True):
+            self.calls.append((url, with_inner))
+            if self.fail:
+                return False, '触发风控', None
+            raw = dict(RAW_COMMENT)
+            raw['note_url'] = url
+            return True, 'success', [raw]
+
+    class _Emit:
+        def __init__(self):
+            self.logs = []
+            self.steps = []
+
+        def log(self, text):
+            self.logs.append(str(text))
+
+        def progress(self, done, total, stage):
+            self.steps.append((done, total, stage))
+
+    # 1) 解析器要求 note_url，未补键时必须抛错（这正是接线前会炸的原因）
+    from xhs_utils.data_util import handle_comment_info
+    try:
+        handle_comment_info(dict(RAW_COMMENT))
+        missing_raises = False
+    except KeyError:
+        missing_raises = True
+    check('评论解析器缺 note_url 会抛 KeyError（已知坑）', missing_raises)
+
+    # 2) api 层补键后可通过，且字段映射正确
+    raw = dict(RAW_COMMENT)
+    raw['note_url'] = 'https://www.xiaohongshu.com/explore/note1?xsec_token=t'
+    parsed = handle_comment_info(raw)
+    check('评论字段映射正确',
+          parsed['comment_id'] == 'cmt1' and parsed['nickname'] == '小红'
+          and parsed['content'] == '这个真好看' and parsed['ip_location'] == '上海'
+          and parsed['note_url'].endswith('xsec_token=t'))
+
+    # 3) 一级评论模式：不展开楼中楼
+    import desktop.spider_service as svc
+    orig = svc._spider_comments
+    # 直接验证 with_inner=False 被传递：替换 XHS_Apis 构造
+    tmp = tempfile.mkdtemp()
+    spec = TaskSpec(mode='comments', comment_urls=['https://a/1'], output_dir=tmp,
+                    task_name='t1', save_excel=True, delay_seconds=0)
+    emit = _Emit()
+
+    import apis.xhs_pc_apis as api_mod
+    import xhs_utils.xhs_pc as pc_mod
+    orig_auth, orig_api = pc_mod.XHSPcAuth, api_mod.XHS_Apis
+
+    stub = _StubApi()
+    pc_mod.XHSPcAuth = type('A', (), {'from_cookie': staticmethod(lambda c: object())})
+    api_mod.XHS_Apis = lambda auth: stub
+    try:
+        summary = run_comment_collection([{'cookie': 'x'}], spec, lambda: False, emit)
+    finally:
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = orig_auth, orig_api
+
+    check('评论采集只取一级（with_inner=False）',
+          stub.calls and all(c[1] is False for c in stub.calls))
+    check('评论采集生成 Excel',
+          summary['comments'] == 1 and summary['excel'].endswith('t1_评论.xlsx')
+          and os.path.exists(summary['excel']))
+    check('评论采集 summary 带 comments 字段', 'comments' in summary and 'zip' not in summary)
+
+    # 4) 风控关键词触发冷却与熔断
+    stub_fail = _StubApi(fail=True)
+    spec_fail = TaskSpec(mode='comments', comment_urls=['https://a/1', 'https://a/2'],
+                         output_dir=tempfile.mkdtemp(), task_name='t2', delay_seconds=0)
+    emit_fail = _Emit()
+    pc_mod.XHSPcAuth = type('A', (), {'from_cookie': staticmethod(lambda c: object())})
+    api_mod.XHS_Apis = lambda auth: stub_fail
+    try:
+        # 把冷却时间压到 0，避免自检等 60 秒
+        orig_cool = svc.RISK_COOLDOWN_SECONDS
+        svc.RISK_COOLDOWN_SECONDS = 0
+        try:
+            run_comment_collection([{'cookie': 'x'}], spec_fail, lambda: False, emit_fail)
+        finally:
+            svc.RISK_COOLDOWN_SECONDS = orig_cool
+    finally:
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = orig_auth, orig_api
+    check('评论采集识别风控关键词',
+          any('风控' in msg for msg in emit_fail.logs))
+    check('评论采集无评论时不建 Excel',
+          not any('Excel 已保存' in msg for msg in emit_fail.logs))
+
+
 # ---------- 6. 类型过滤 ----------
 
 def test_should_collect():
@@ -287,6 +424,7 @@ if __name__ == '__main__':
     test_task_spec()
     test_xiaolvsu_zip()
     test_ai_parse()
+    test_comment_collection()
     test_should_collect()
     print()
     if FAILURES:
