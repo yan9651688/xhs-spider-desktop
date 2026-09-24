@@ -148,7 +148,7 @@ def test_gui():
         {'server': 'http://demo', 'username': 'alice', 'output_dir': os.getcwd()},
         {'token': 't', 'username': 'alice', 'name': 'Alice', 'xhsExpireTime': '永久'},
     )
-    check('主窗口构建（4 个采集页签）', window.tabs.count() == 4)
+    check('主窗口构建（5 个采集页签）', window.tabs.count() == 5)
     spec = window._current_spec()
     check('默认任务模式为 search', spec.mode == 'search' and spec.query == '')
     window.tabs.setCurrentIndex(1)
@@ -183,6 +183,27 @@ def test_gui():
     check('切回搜索页恢复媒体选项',
           not window.img_check.isHidden() and not window.zip_check.isHidden()
           and not window.ai_check.isHidden())
+
+    # 收藏采集页签：模式解析、类型切换、校验
+    window.tabs.setCurrentIndex(4)
+    spec = window._current_spec()
+    check('收藏模式默认采集收藏',
+          spec.mode == 'collect' and spec.collect_kind == 'collect')
+    check('收藏模式空主页被拦截',
+          '主页链接' in window._validate_spec(spec))
+    window.collect_kind_combo.setCurrentIndex(1)
+    check('收藏模式可切到赞过',
+          window._current_spec().collect_kind == 'like')
+    window.collect_user_edit.setText(
+        'https://www.xiaohongshu.com/user/profile/abc123?xsec_token=t')
+    spec = window._current_spec()
+    check('收藏模式校验通过', window._validate_spec(spec) == '')
+    check('收藏模式任务名带类型前缀', spec.task_name == '赞过abc123')
+    check('收藏模式保留媒体选项', not window.img_check.isHidden())
+    window.collect_kind_combo.setCurrentIndex(0)
+    check('收藏模式任务名随类型变化',
+          window._current_spec().task_name == '收藏abc123')
+    window.tabs.setCurrentIndex(0)
     window.deleteLater()
     app.processEvents()
 
@@ -395,6 +416,56 @@ def test_comment_collection():
           not any('Excel 已保存' in msg for msg in emit_fail.logs))
 
 
+# ---------- 6b. 收藏采集 ----------
+
+def test_collect_urls():
+    from desktop.spider_service import TaskSpec, _note_urls_from_list, collect_note_urls
+
+    # 字段齐全
+    urls = _note_urls_from_list(
+        [{'note_id': 'n1', 'xsec_token': 'tk1'}], '收藏')
+    check('收藏列表拼出完整 URL',
+          len(urls) == 1 and '/explore/n1' in urls[0] and 'xsec_token=tk1' in urls[0])
+
+    # 缺字段跳过而非中断（赞过/收藏接口返回结构与用户作品接口不同）
+    urls = _note_urls_from_list(
+        [{'note_id': 'n1', 'xsec_token': 'tk1'},
+         {'note_id': 'n2'},
+         {'xsec_token': 'tk3'},
+         {}], '赞过')
+    check('缺 note_id/xsec_token 的条目被跳过', len(urls) == 1)
+
+    # 兼容 id 字段命名差异
+    urls = _note_urls_from_list([{'id': 'n9', 'xsec_token': 'tk9'}], '收藏')
+    check('兼容 id 命名的笔记对象', len(urls) == 1 and '/explore/n9' in urls[0])
+
+    # 空列表不报错
+    check('空列表返回空', _note_urls_from_list([], '收藏') == [])
+
+    # 模式分发
+    class _StubApi:
+        def __init__(self):
+            self.called = None
+
+        def get_user_all_collect_note_info(self, user_url, proxies=None):
+            self.called = 'collect'
+            return True, 'ok', [{'note_id': 'c1', 'xsec_token': 't1'}]
+
+        def get_user_all_like_note_info(self, user_url, proxies=None):
+            self.called = 'like'
+            return True, 'ok', [{'note_id': 'l1', 'xsec_token': 't1'}]
+
+    api = _StubApi()
+    spec = TaskSpec(mode='collect', user_url='https://x/user/profile/u1?xsec_token=t',
+                    collect_kind='collect')
+    urls = collect_note_urls(api, spec)
+    check('collect 模式调用收藏接口', api.called == 'collect' and '/explore/c1' in urls[0])
+
+    spec.collect_kind = 'like'
+    urls = collect_note_urls(api, spec)
+    check('like 模式调用赞过接口', api.called == 'like' and '/explore/l1' in urls[0])
+
+
 # ---------- 6. 类型过滤 ----------
 
 def test_should_collect():
@@ -425,6 +496,7 @@ if __name__ == '__main__':
     test_xiaolvsu_zip()
     test_ai_parse()
     test_comment_collection()
+    test_collect_urls()
     test_should_collect()
     print()
     if FAILURES:

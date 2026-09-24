@@ -475,6 +475,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_urls_tab(), '链接采集')
         self.tabs.addTab(self._build_user_tab(), '主页采集')
         self.tabs.addTab(self._build_comments_tab(), '评论采集')
+        self.tabs.addTab(self._build_collect_tab(), '收藏采集')
         self.tabs.currentChanged.connect(self._sync_option_visibility)
         card_layout.addWidget(self.tabs)
         outer.addWidget(collect_card, 1)
@@ -610,6 +611,7 @@ class MainWindow(QMainWindow):
         """评论采集页只保留「Excel」选项；其余页签显示全部（默认行为不变）。"""
         if index is None:
             index = self.tabs.currentIndex()
+        # 页签顺序：0 搜索 1 链接 2 主页 3 评论 4 收藏
         is_comments = index == 3
         for widget in getattr(self, 'media_option_widgets', []):
             widget.setVisible(not is_comments)
@@ -714,6 +716,25 @@ class MainWindow(QMainWindow):
         hint = QLabel('采集每篇笔记的一级评论，结果导出为 Excel（评论内容/评论者/点赞/IP 属地/时间）。')
         hint.setObjectName('mutedLabel')
         layout.addWidget(hint)
+        return tab
+
+    def _build_collect_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.setContentsMargins(12, 14, 12, 10)
+        form.setSpacing(10)
+        self.collect_kind_combo = QComboBox()
+        self.collect_kind_combo.addItem('收藏的笔记', 'collect')
+        self.collect_kind_combo.addItem('赞过的笔记', 'like')
+        form.addRow('采集类型', self.collect_kind_combo)
+        self.collect_user_edit = QLineEdit()
+        self.collect_user_edit.setPlaceholderText(
+            '用户主页链接，例如：https://www.xiaohongshu.com/user/profile/xxxx?xsec_token=...'
+        )
+        form.addRow('主页', self.collect_user_edit)
+        hint = QLabel('采集该用户公开的收藏 / 赞过笔记（对方未公开则可能为空）。')
+        hint.setObjectName('mutedLabel')
+        form.addRow('', hint)
         return tab
 
     # ---------- 矩阵占位页 ----------
@@ -1050,6 +1071,14 @@ class MainWindow(QMainWindow):
             spec.comment_urls = self.comments_edit.toPlainText().splitlines()
             if not spec.task_name:
                 spec.task_name = '评论采集'
+        elif index == 4:
+            spec.mode = 'collect'
+            spec.collect_kind = self.collect_kind_combo.currentData()
+            spec.user_url = self.collect_user_edit.text().strip()
+            if not spec.task_name:
+                tail = spec.user_url.split('/')[-1].split('?')[0]
+                prefix = '赞过' if spec.collect_kind == 'like' else '收藏'
+                spec.task_name = f'{prefix}{tail}' if tail else f'{prefix}采集'
         return spec
 
     def _validate_spec(self, spec: TaskSpec) -> str:
@@ -1060,6 +1089,8 @@ class MainWindow(QMainWindow):
         if spec.mode == 'search' and not spec.query:
             return '请输入搜索关键词'
         if spec.mode == 'user' and not spec.user_url:
+            return '请输入用户主页链接'
+        if spec.mode == 'collect' and not spec.user_url:
             return '请输入用户主页链接'
         if spec.mode == 'urls' and not spec.note_urls:
             return '请至少填写一个笔记链接'

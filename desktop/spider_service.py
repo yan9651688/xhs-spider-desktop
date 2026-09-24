@@ -17,7 +17,7 @@ from loguru import logger
 
 @dataclass
 class TaskSpec:
-    mode: str = 'search'            # search / urls / user / comments
+    mode: str = 'search'            # search / urls / user / comments / collect
     query: str = ''
     require_num: int = 20
     sort_type: int = 0              # 0 综合 1 最新 2 最多点赞 3 最多评论 4 最多收藏
@@ -26,6 +26,7 @@ class TaskSpec:
     note_urls: list = field(default_factory=list)
     user_url: str = ''
     comment_urls: list = field(default_factory=list)   # 评论采集：笔记链接列表
+    collect_kind: str = 'collect'   # 收藏采集：collect=收藏 / like=赞过
     save_images: bool = True
     save_videos: bool = True
     save_excel: bool = True
@@ -54,6 +55,31 @@ def sanitize_name(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|\s]+', '_', (name or '').strip()) or time.strftime('%Y%m%d_%H%M%S')
 
 
+def _note_urls_from_list(notes: list, source_label: str):
+    """笔记对象列表 -> 完整笔记 URL 列表。
+
+    赞过/收藏接口返回的 note 结构与「用户作品」接口未必一致（前者走
+    /api/sns/web/v1/note/like/page 与 /v2/note/collect/page），字段可能缺失。
+    这里逐条判键，缺 id/xsec_token 的跳过并记日志，避免整批 KeyError 中断。
+    """
+    urls = []
+    skipped = 0
+    for note in notes or []:
+        note_id = note.get('note_id') or note.get('id')
+        token = note.get('xsec_token')
+        if not note_id or not token:
+            skipped += 1
+            continue
+        source = 'pc_search' if source_label == '赞过' else 'pc_user'
+        urls.append(
+            f'https://www.xiaohongshu.com/explore/{note_id}'
+            f'?xsec_token={token}&xsec_source={source}'
+        )
+    if skipped:
+        logger.warning(f'{source_label}列表有 {skipped} 条缺 note_id/xsec_token，已跳过')
+    return urls
+
+
 def collect_note_urls(api, spec: TaskSpec):
     """按任务模式取笔记 URL 列表。"""
     if spec.mode == 'search':
@@ -78,6 +104,16 @@ def collect_note_urls(api, spec: TaskSpec):
             f"?xsec_token={n['xsec_token']}&xsec_source=pc_user"
             for n in notes
         ]
+    if spec.mode == 'collect':
+        if spec.collect_kind == 'like':
+            success, msg, notes = api.get_user_all_like_note_info(spec.user_url)
+            label = '赞过'
+        else:
+            success, msg, notes = api.get_user_all_collect_note_info(spec.user_url)
+            label = '收藏'
+        if not success:
+            raise RuntimeError(f'获取用户{label}笔记失败：{msg}')
+        return _note_urls_from_list(notes, label)
     if spec.mode == 'urls':
         urls = [u.strip() for u in spec.note_urls or [] if u.strip()]
         if not urls:
