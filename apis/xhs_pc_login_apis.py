@@ -88,6 +88,10 @@ class XHSLoginApi:
         self.web_profile_i12_seed = web_profile_i12_seed
         self.web_profile_fi = web_profile_fi
         self._cookie_store = HostCookieStore()
+        # 最近一次 qrcode_login 失败的**具体**原因（面向用户的提示语）。
+        # qrcode_login 用返回 None 表示失败，调用方只看到"没拿到 Cookie"，
+        # 会把 9 种不同失败原因显示成同一句话；这里补上可读原因供调用方展示。
+        self.last_error = ''
 
     def close(self):
         self.http.close()
@@ -828,11 +832,18 @@ class XHSLoginApi:
         poll_interval=2.0,
         qr_callback=None,
     ):
+        """扫码登录。成功返回 Cookie 字符串，失败返回 None。
+
+        失败时 ``self.last_error`` 会写入面向用户的具体原因（中文），
+        调用方可据此给出可诊断的提示，而不是笼统的"没拿到 Cookie"。
+        """
+        self.last_error = ''
         logger.info('[1/5] 正在初始化匿名设备...')
         try:
             cookies = self.generate_init_cookies()
         except Exception as exc:
             logger.error(f'匿名设备初始化失败: {exc}')
+            self.last_error = f'初始化匿名设备失败：{exc}'
             return None
         logger.debug(f'初始 Cookie 字段: {list(cookies)}')
 
@@ -840,6 +851,7 @@ class XHSLoginApi:
         success, msg, qr_data = self.generate_qrcode(cookies)
         if not success:
             logger.error(f'获取二维码失败: {msg}')
+            self.last_error = f'获取二维码失败：{msg}'
             return None
         cookies = qr_data['cookies']
 
@@ -851,13 +863,16 @@ class XHSLoginApi:
             )
             if success:
                 logger.error('二维码在展示前已被确认，拒绝复用异常登录状态')
+                self.last_error = '二维码状态异常（展示前已被确认），请重新生成'
                 return None
             if msg != '请扫描二维码':
                 logger.error(f'二维码预检查状态异常: {msg}')
+                self.last_error = f'二维码预检查失败：{msg}'
                 return None
             self.ensure_webprofile(cookies)
         except Exception as exc:
             logger.error(f'匿名指纹验收失败，未进入扫码阶段: {exc}')
+            self.last_error = f'本地指纹环境校验失败：{exc}'
             return None
 
         logger.info('请使用小红书APP扫描以下二维码:')
@@ -870,29 +885,43 @@ class XHSLoginApi:
 
         logger.info('[4/5] 等待扫码和手机确认...')
         deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        poll_errors = 0
         while time.monotonic() < deadline:
             try:
                 success, msg, cookies = self.check_qrcode_status(
                     qr_data['qr_id'], qr_data['code'], cookies
                 )
             except Exception as exc:
-                logger.error(f'二维码状态检查失败: {exc}')
-                return None
+                # 单次网络抖动不该让整次扫码作废：容忍连续 3 次，之后才放弃。
+                poll_errors += 1
+                logger.warning(f'二维码状态检查失败（第 {poll_errors}/3 次）: {exc}')
+                if poll_errors >= 3:
+                    logger.error(f'二维码状态检查连续失败: {exc}')
+                    self.last_error = f'网络连接不稳定，请检查网络后重试（{exc}）'
+                    return None
+                time.sleep(max(0.5, float(poll_interval)))
+                continue
+            poll_errors = 0
             if success:
                 logger.info(msg)
                 break
             if msg == '二维码已过期':
                 logger.error(msg)
+                self.last_error = '二维码已过期，请点击「开始扫码 / 刷新二维码」重新生成'
                 return None
             time.sleep(max(0.5, float(poll_interval)))
         else:
             logger.error('等待扫码超时，请重新生成二维码')
+            self.last_error = '等待扫码超时（3 分钟），请重新生成二维码后尽快扫码'
             return None
 
         logger.info('[5/5] 验证正式登录状态...')
         success, user_info, cookies = self.get_user_info(cookies)
-        if not success or user_info.get('guest') is not False:
+        # guest 字段只在明确返回 True（访客会话）时才拒绝；
+        # 字段缺失时放行，避免小红书调整响应结构就导致全部登录失败。
+        if not success or user_info.get('guest') is True:
             logger.error('正式会话验证失败，拒绝返回访客 Cookie')
+            self.last_error = '未获取到正式登录状态，请重新扫码；若反复出现请稍后再试'
             return None
         logger.info(f'用户: {user_info.get("nickname", "未知")} (RedID: {user_info.get("red_id", "未知")})')
 

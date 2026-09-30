@@ -484,7 +484,10 @@ class XHSPcAuth(XHSAuth):
         )
         if not cookies:
             http_client.close()
-            raise RuntimeError('XHS QR login did not return an authenticated Cookie')
+            # 带上 qrcode_login 记录的具体原因，避免上层只看到笼统的"没拿到 Cookie"
+            raise RuntimeError(
+                login.last_error or '登录未返回有效 Cookie，请重试'
+            )
         auth = cls(
             cookies=cookies,
             login_source='qrcode',

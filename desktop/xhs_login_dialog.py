@@ -35,7 +35,8 @@ class QrLoginThread(QThread):
                 qr_callback=self.qr_ready.emit,
             )
         except Exception as exc:  # 二维码过期/网络失败/初始化失败
-            self.failed.emit(f'扫码登录失败：{exc}')
+            # exc 已由 qrcode_login 填好具体原因（如"二维码已过期…"），直接展示
+            self.failed.emit(str(exc))
             return
         cookie = ''
         try:
