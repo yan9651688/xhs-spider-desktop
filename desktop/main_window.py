@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 from loguru import logger
 from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
@@ -54,6 +55,15 @@ TIME_OPTIONS = [('不限', 0), ('一天内', 1), ('一周内', 2), ('半年内',
 TABLE_COLUMNS = ['标题', '类型', '作者', '点赞', '收藏', '评论', '发布时间', '链接']
 
 NAV_HOME, NAV_MATRIX, NAV_SETTINGS = 0, 1, 2
+
+# 账号矩阵
+ACCOUNT_COLUMNS = ['账号', '小红书号', '状态', '粉丝', '关注', '获赞与收藏',
+                   '作品', 'IP属地', '最近巡检']
+PROBE_INTERVAL_MS = 6 * 60 * 60 * 1000        # 自动巡检间隔：6 小时
+PROBE_ACCOUNT_GAP_SECONDS = 0.4               # 账号之间的间隔，降风控
+RISK_COOLDOWN_SECONDS = 60                    # 某号命中限流后的加长冷却
+
+_HEALTH_PLACEHOLDER = '—'
 
 
 def line_icon(kind: str, color: str = '#8a8f98', size: int = 18) -> QIcon:
@@ -260,6 +270,46 @@ class _AiTestWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class _AccountProbeWorker(QThread):
+    """逐账号巡检。
+
+    items 是 [{'key','cookie'}] 的**冻结快照**：巡检中用户在侧边栏删账号
+    不会让 key 漂移（Cookie 池的删除是按数组下标的，绝不能在下标上做文章）。
+    """
+    one = Signal(str, object)         # key, 巡检结果
+    progress = Signal(int, int)       # done, total
+    finished_all = Signal(int, int)   # 正常账号数, 总数
+
+    def __init__(self, items: list, full: bool = True, parent=None):
+        super().__init__(parent)
+        self.items = [dict(item) for item in items]
+        self.full = full
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        from desktop import paths
+        from desktop.account_probe import probe_account
+
+        ok_count = 0
+        for index, item in enumerate(self.items, start=1):
+            if self._stop:
+                break
+            result = probe_account(item.get('cookie') or '', full=self.full)
+            paths.upsert_account(item.get('key') or '', **result)
+            if result.get('health') == paths.HEALTH_OK:
+                ok_count += 1
+            self.one.emit(item.get('key') or '', result)
+            self.progress.emit(index, len(self.items))
+            if index < len(self.items):
+                time.sleep(RISK_COOLDOWN_SECONDS
+                           if result.get('health') == paths.HEALTH_LIMITED
+                           else PROBE_ACCOUNT_GAP_SECONDS)
+        self.finished_all.emit(ok_count, len(self.items))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config: dict, session: dict):
         super().__init__()
@@ -269,12 +319,16 @@ class MainWindow(QMainWindow):
         self.xhs_nickname = ''
         self.collect_worker = None
         self.restore_worker = None
+        self._probe_worker = None
+        self._probe_running = False
         self._log_sink_id = None
 
         self.setWindowTitle('小红书采集工具')
         self.resize(1120, 760)
         self.setMinimumSize(1000, 680)
         self._build_ui()
+        # 首帧就把台账读出来（不写文件），避免客户切进矩阵页看到空白
+        self.refresh_matrix_page(sync=False)
 
         self._log_bridge = _LogBridge(self)
         self._log_bridge.message.connect(self.append_log)
@@ -289,6 +343,14 @@ class MainWindow(QMainWindow):
         self._check_timer.timeout.connect(self.run_session_check)
         self._check_timer.start()
         QTimer.singleShot(1500, self.run_session_check)
+
+        # 账号巡检：启动后延迟一轮快速体检（错开会话恢复），之后按设置定时
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setInterval(PROBE_INTERVAL_MS)
+        self._probe_timer.timeout.connect(self.run_scheduled_probe)
+        if self.config.get('probe_auto', True):
+            self._probe_timer.start()
+        QTimer.singleShot(4000, self.run_startup_probe)
 
         self.restore_xhs_session()
 
@@ -361,7 +423,7 @@ class MainWindow(QMainWindow):
                 layout.addWidget(btn)
 
         add_nav(NAV_HOME, '采集中心', 'home')
-        add_nav(NAV_MATRIX, '账号矩阵', 'grid', badge='soon')
+        add_nav(NAV_MATRIX, '账号矩阵', 'grid')
         add_nav(NAV_SETTINGS, '设置', 'gear')
 
         layout.addSpacing(14)
@@ -772,31 +834,304 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         return tab
 
-    # ---------- 矩阵占位页 ----------
+    # ---------- 账号矩阵：资产台账 + 健康巡检 ----------
 
     def _build_matrix_page(self) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(22, 18, 22, 16)
-        card = QFrame()
-        card.setObjectName('card')
-        box = QVBoxLayout(card)
-        box.setAlignment(Qt.AlignCenter)
-        box.setSpacing(10)
-        icon = QLabel('🧩')
-        icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet('font-size:44px; background: transparent;')
-        title = QLabel('账号矩阵 · 开发中')
+        outer.setSpacing(12)
+
+        # 标题行
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
+        title = QLabel('账号矩阵')
         title.setObjectName('greetTitle')
-        title.setAlignment(Qt.AlignCenter)
-        desc = QLabel('多账号统一管理、批量采集与发布调度。\n侧边栏入口已预留，规划中敬请期待。')
-        desc.setObjectName('mutedLabel')
-        desc.setAlignment(Qt.AlignCenter)
-        box.addWidget(icon)
-        box.addWidget(title)
-        box.addWidget(desc)
-        outer.addWidget(card, 1)
+        self.matrix_sub = QLabel('正在读取账号台账…')
+        self.matrix_sub.setObjectName('greetSub')
+        title_box.addWidget(title)
+        title_box.addWidget(self.matrix_sub)
+        header.addLayout(title_box)
+        header.addStretch(1)
+        self.matrix_status = QLabel('')
+        self.matrix_status.setObjectName('mutedLabel')
+        header.addWidget(self.matrix_status)
+        self.probe_fast_btn = QPushButton('快速体检')
+        self.probe_fast_btn.setObjectName('softBtn')
+        self.probe_fast_btn.setCursor(Qt.PointingHandCursor)
+        self.probe_fast_btn.setToolTip('只验证登录态，每个账号 1 次请求，最快')
+        self.probe_fast_btn.clicked.connect(lambda: self.start_probe(full=False))
+        header.addWidget(self.probe_fast_btn)
+        self.probe_full_btn = QPushButton('立即巡检')
+        self.probe_full_btn.setObjectName('primaryBtn')
+        self.probe_full_btn.setCursor(Qt.PointingHandCursor)
+        self.probe_full_btn.setToolTip('刷新全部账号的资产数据（粉丝/作品/头像等）')
+        self.probe_full_btn.clicked.connect(lambda: self.start_probe(full=True))
+        header.addWidget(self.probe_full_btn)
+        outer.addLayout(header)
+
+        # 统计卡（objectName 对应 app.py STYLE 里的 statCard4-7）
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+        self.stat_accounts = self._stat_card(cards, 'statCard4', '账号总数', '0 个')
+        self.stat_healthy = self._stat_card(cards, 'statCard5', '健康账号', '0 个')
+        self.stat_broken = self._stat_card(cards, 'statCard6', '异常账号', '0 个')
+        self.stat_fans = self._stat_card(cards, 'statCard7', '总粉丝数', '—')
+        outer.addLayout(cards)
+
+        # 台账表
+        table_card = QFrame()
+        table_card.setObjectName('card')
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(14, 12, 14, 12)
+        table_layout.setSpacing(8)
+        self.matrix_table = QTableWidget(0, len(ACCOUNT_COLUMNS))
+        self.matrix_table.setObjectName('accountTable')
+        self.matrix_table.setHorizontalHeaderLabels(ACCOUNT_COLUMNS)
+        header = self.matrix_table.horizontalHeader()
+        # 账号列吃剩余宽度，其余列按内容自适应：否则 8 个默认 100px 的列会把
+        # Stretch 的账号列挤成一条缝，昵称完全显示不出来
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, len(ACCOUNT_COLUMNS)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setMinimumSectionSize(48)
+        self.matrix_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.matrix_table.setAlternatingRowColors(True)
+        self.matrix_table.setWordWrap(False)
+        self.matrix_table.verticalHeader().setVisible(False)
+        self.matrix_table.verticalHeader().setDefaultSectionSize(44)
+        self.matrix_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.matrix_table.doubleClicked.connect(self.open_current_account)
+        table_layout.addWidget(self.matrix_table, 1)
+        self.matrix_hint = QLabel('点「快速体检」验证登录态，点「立即巡检」刷新资产数据。')
+        self.matrix_hint.setObjectName('mutedLabel')
+        table_layout.addWidget(self.matrix_hint)
+        outer.addWidget(table_card, 1)
         return page
+
+    def refresh_matrix_page(self, sync: bool = True):
+        """重建台账表与统计卡（进入页面 / 巡检完 / 账号池变动时调用）。
+
+        sync=False 用于巡检过程中的高频刷新：此时 worker 正在写台账文件，
+        主线程不能再调 sync_accounts_from_pool 去写同一个文件。
+        """
+        if not hasattr(self, 'matrix_table'):
+            return
+        if sync:
+            paths.sync_accounts_from_pool()
+        ledger = paths.load_accounts()
+        records = list(ledger['accounts'].values())
+        # 需处理的排前面：异常(0) > 未巡检(1) > 正常(2)，同级按昵称
+        def _sort_key(record):
+            health = record.get('health') or paths.HEALTH_UNKNOWN
+            if health in (paths.HEALTH_EXPIRED, paths.HEALTH_LIMITED):
+                rank = 0
+            elif health == paths.HEALTH_OK:
+                rank = 2
+            else:
+                rank = 1
+            return (rank, str(record.get('nickname') or ''))
+        records.sort(key=_sort_key)
+
+        table = self.matrix_table
+        table.setRowCount(0)
+        for record in records:
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setCellWidget(row, 0, self._account_cell(record))
+            values = [
+                str(record.get('red_id') or _HEALTH_PLACEHOLDER),
+                '',  # 状态列用 cellWidget 上色
+                self._format_count(record.get('fans')),
+                self._format_count(record.get('follows')),
+                self._format_count(record.get('interaction')),
+                self._format_count(record.get('posted')),
+                str(record.get('ip_location') or _HEALTH_PLACEHOLDER),
+                self._format_checked_at(record.get('checked_at')),
+            ]
+            for offset, text in enumerate(values, start=1):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, record.get('key') or '')
+                if offset > 1:
+                    item.setTextAlignment(Qt.AlignCenter)
+                table.setItem(row, offset, item)
+            table.setCellWidget(row, 2, self._health_label(record.get('health')))
+
+        self._update_matrix_stats(records)
+        self.render_xhs_accounts()
+
+    def _account_cell(self, record: dict) -> QWidget:
+        """账号单元格：头像 + 昵称 + 备注（一行放不下就只显示昵称）。"""
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.setSpacing(8)
+        avatar = QLabel()
+        avatar.setFixedSize(28, 28)
+        avatar.setAlignment(Qt.AlignCenter)
+        avatar.setPixmap(self._account_avatar(record))
+        nickname = QLabel(str(record.get('nickname') or '未命名账号'))
+        nickname.setObjectName('accountName')
+        note = str(record.get('health_note') or '')
+        if note:
+            nickname.setToolTip(note)
+        if str(record.get('red_id') or ''):
+            nickname.setToolTip(
+                f"小红书号：{record.get('red_id')}" + (f'\n{note}' if note else ''))
+        row.addWidget(avatar)
+        row.addWidget(nickname, 1)
+        return holder
+
+    @staticmethod
+    def _account_avatar(record: dict) -> QPixmap:
+        """优先用本地缓存头像，缺失/损坏时回退渐变首字。"""
+        avatar_file = str(record.get('avatar_file') or '')
+        if avatar_file and os.path.exists(avatar_file):
+            pixmap = QPixmap(avatar_file)
+            if not pixmap.isNull():
+                return pixmap.scaled(28, 28, Qt.KeepAspectRatioByExpanding,
+                                     Qt.SmoothTransformation)
+        name = str(record.get('nickname') or '·')
+        return gradient_tile(name[:1], ['#7d6ef0', '#5a4bd0'],
+                             size=28, radius=14, font_size=13)
+
+    @staticmethod
+    def _health_label(health: str) -> QLabel:
+        health = health or paths.HEALTH_UNKNOWN
+        label = QLabel(paths.HEALTH_LABELS.get(health, '未知'))
+        label.setObjectName({
+            paths.HEALTH_OK: 'healthOk',
+            paths.HEALTH_EXPIRED: 'healthExpired',
+            paths.HEALTH_LIMITED: 'healthLimited',
+            paths.HEALTH_NETWORK: 'healthNetwork',
+        }.get(health, 'healthUnknown'))
+        label.setAlignment(Qt.AlignCenter)
+        return label
+
+    @staticmethod
+    def _format_count(value) -> str:
+        try:
+            return f'{int(value):,}'
+        except (TypeError, ValueError):
+            return _HEALTH_PLACEHOLDER
+
+    @staticmethod
+    def _format_checked_at(checked_at: str) -> str:
+        text = str(checked_at or '')
+        if not text:
+            return '未巡检'
+        return text[5:16] if len(text) >= 16 else text
+
+    def _update_matrix_stats(self, records: list):
+        total = len(records)
+        healthy = [r for r in records if r.get('health') == paths.HEALTH_OK]
+        broken = [r for r in records
+                  if r.get('health') in (paths.HEALTH_EXPIRED, paths.HEALTH_LIMITED)]
+        unchecked = [r for r in records
+                     if r.get('health') in ('', None, paths.HEALTH_UNKNOWN)]
+        self.stat_accounts.setText(f'{total} 个')
+        self.stat_healthy.setText(f'{len(healthy)} 个')
+        self.stat_broken.setText(f'{len(broken)} 个')
+        self.stat_fans.setText(
+            f'{sum(int(r.get("fans") or 0) for r in healthy):,}' if healthy else '—')
+        if not hasattr(self, 'matrix_sub'):
+            return
+        last = max((str(r.get('checked_at') or '') for r in records), default='')
+        parts = [f'{total} 个账号']
+        if last:
+            parts.append(f'最近巡检 {last[5:16]}')
+        self.matrix_sub.setText(' · '.join(parts))
+        # 统计口径只算已巡检账号，避免用偏低数字误导客户
+        if unchecked and healthy:
+            self.matrix_hint.setText(
+                f'总粉丝数只统计已巡检的 {len(healthy)} 个正常账号'
+                f'（另有 {len(unchecked)} 个账号未巡检）。'
+            )
+        elif total == 0:
+            self.matrix_hint.setText('还没有小红书账号，先在左侧「扫码添加账号」。')
+        else:
+            self.matrix_hint.setText('点「快速体检」验证登录态，点「立即巡检」刷新资产数据。')
+
+    def open_current_account(self, index):
+        # 第 0 列是 cellWidget（头像+昵称），取不到 item，主键存在第 1 列上
+        item = self.matrix_table.item(index.row(), 1)
+        key = item.data(Qt.UserRole) if item else ''
+        record = paths.load_accounts()['accounts'].get(key or '') or {}
+        user_id = str(record.get('user_id') or '')
+        if user_id:
+            QDesktopServices.openUrl(
+                QUrl(f'https://www.xiaohongshu.com/user/profile/{user_id}'))
+
+    # ---------- 巡检调度 ----------
+
+    def run_startup_probe(self):
+        """启动后一轮快速体检：客户打开软件就能看到账号还活着没。"""
+        self.start_probe(full=False, silent=True)
+
+    def run_scheduled_probe(self):
+        self.start_probe(full=False, silent=True)
+
+    def probe_items(self) -> list:
+        """巡检目标快照（key + cookie）；以 Cookie 池为准，台账里已删的不参与。"""
+        items = []
+        ledger = paths.load_accounts()['accounts']
+        for entry in paths.load_xhs_cookies():
+            cookie = (entry or {}).get('cookie') or ''
+            if not cookie:
+                continue
+            key = paths.account_key(cookie)
+            record = ledger.get(key) or {}
+            items.append({'key': key, 'cookie': record.get('cookie') or cookie})
+        return items
+
+    def start_probe(self, full: bool = True, silent: bool = False):
+        if self._probe_running:
+            if not silent:
+                self.matrix_status.setText('巡检进行中…')
+            return
+        if self.collect_worker is not None and self.collect_worker.isRunning():
+            # 与采集互斥：两套流程同时打接口会把风控风险叠加
+            if not silent:
+                QMessageBox.information(self, '稍后再试', '采集任务正在运行，请等它结束后再巡检账号。')
+            return
+        items = self.probe_items()
+        if not items:
+            if not silent:
+                QMessageBox.information(self, '暂无账号', '账号池为空，请先在左侧「扫码添加账号」。')
+            return
+        self._probe_running = True
+        self.matrix_status.setText(f'巡检中 0/{len(items)}…')
+        self._set_probe_buttons(False)
+        worker = _AccountProbeWorker(items, full=full, parent=self)
+        worker.one.connect(self._on_probe_one)
+        worker.progress.connect(self._on_probe_progress)
+        worker.finished_all.connect(self._on_probe_finished)
+        worker.finished.connect(self._on_probe_thread_done)
+        worker.start()
+        self._probe_worker = worker
+
+    def _set_probe_buttons(self, enabled: bool):
+        for name in ('probe_fast_btn', 'probe_full_btn'):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(enabled)
+
+    def _on_probe_progress(self, done: int, total: int):
+        self.matrix_status.setText(f'巡检中 {done}/{total}…')
+
+    def _on_probe_one(self, key: str, result: dict):
+        # worker 正在写台账，这里只重绘界面不再同步文件
+        self.refresh_matrix_page(sync=False)
+
+    def _on_probe_finished(self, ok_count: int, total: int):
+        self.matrix_status.setText(
+            f'巡检完成：{ok_count}/{total} 个账号正常')
+        self.refresh_matrix_page()
+
+    def _on_probe_thread_done(self):
+        self._probe_running = False
+        self._set_probe_buttons(True)
 
     # ---------- 设置页 ----------
 
@@ -831,6 +1166,11 @@ class MainWindow(QMainWindow):
         dir_row.addWidget(browse_btn)
         dir_row.addWidget(open_btn)
         form.addRow('输出目录', dir_row)
+        self.probe_auto_check = QCheckBox('每 6 小时自动体检账号（账号矩阵）')
+        self.probe_auto_check.setChecked(bool(self.config.get('probe_auto', True)))
+        self.probe_auto_check.setToolTip('关闭后只能手动点「快速体检 / 立即巡检」')
+        self.probe_auto_check.toggled.connect(self.toggle_auto_probe)
+        form.addRow('账号巡检', self.probe_auto_check)
         clear_btn = QPushButton('清除小红书登录状态')
         clear_btn.setObjectName('dangerBtn')
         clear_btn.setCursor(Qt.PointingHandCursor)
@@ -905,6 +1245,15 @@ class MainWindow(QMainWindow):
         outer.addStretch(1)
         return page
 
+    def toggle_auto_probe(self, enabled: bool):
+        self.config['probe_auto'] = bool(enabled)
+        paths.save_config(self.config)
+        if enabled:
+            self._probe_timer.start()
+        else:
+            self._probe_timer.stop()
+        self.append_log('账号自动巡检已' + ('开启（每 6 小时）' if enabled else '关闭'))
+
     def save_ai_config(self):
         self.config['ai_base'] = paths.AI_BASE_FIXED
         self.config['ai_key'] = self.ai_key_edit.text().strip()
@@ -943,11 +1292,14 @@ class MainWindow(QMainWindow):
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
         self.pages.setCurrentIndex(key)
+        if key == NAV_MATRIX:
+            # 切进矩阵页时刷新台账（sync=False：不重复写台账文件）
+            self.refresh_matrix_page(sync=False)
 
     # ---------- Cookie 池侧边栏 ----------
 
     def render_xhs_accounts(self):
-        """按 Cookie 池重建侧边栏账号列表。"""
+        """按 Cookie 池重建侧边栏账号列表；圆点颜色取自账号台账的健康状态。"""
         while self.xhs_accounts_box.count():
             item = self.xhs_accounts_box.takeAt(0)
             widget = item.widget()
@@ -955,6 +1307,7 @@ class MainWindow(QMainWindow):
                 widget.setParent(None)
                 widget.deleteLater()
         cookies = paths.load_xhs_cookies()
+        ledger = paths.load_accounts()['accounts']
         if not cookies:
             empty = QLabel('暂无账号，请先扫码')
             empty.setObjectName('mutedLabel')
@@ -962,14 +1315,22 @@ class MainWindow(QMainWindow):
             self.xhs_accounts_box.addWidget(empty)
         for index, item in enumerate(cookies):
             name = item.get('nickname') or f'账号{index + 1}'
+            record = ledger.get(paths.account_key(item.get('cookie') or '')) or {}
+            health = record.get('health') or paths.HEALTH_UNKNOWN
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(10, 3, 4, 3)
             row_layout.setSpacing(6)
             dot = QLabel()
-            dot.setObjectName('accountDot')
+            dot.setObjectName({
+                paths.HEALTH_OK: 'accountDotOk',
+                paths.HEALTH_EXPIRED: 'accountDotExpired',
+                paths.HEALTH_LIMITED: 'accountDotLimited',
+                paths.HEALTH_NETWORK: 'accountDotNetwork',
+            }.get(health, 'accountDotUnknown'))
             dot.setAttribute(Qt.WA_StyledBackground, True)
             dot.setFixedSize(7, 7)
+            dot.setToolTip(f"状态：{paths.HEALTH_LABELS.get(health, '未知')}")
             name_label = QLabel(name)
             name_label.setObjectName('accountName')
             del_btn = QPushButton('✕')
@@ -986,8 +1347,16 @@ class MainWindow(QMainWindow):
             self.stat_xhs.setText(f'{len(cookies)} 个' if cookies else '未登录')
 
     def remove_account(self, index: int):
+        cookie = ''
+        items = paths.load_xhs_cookies()
+        if 0 <= index < len(items):
+            cookie = (items[index] or {}).get('cookie') or ''
         paths.remove_xhs_cookie(index)
+        if cookie:
+            # 客户在侧边栏删掉的号，台账里也一并清掉（含历史快照与头像缓存）
+            paths.remove_accounts([paths.account_key(cookie)])
         self.append_log(f'已从账号池移除账号 {index + 1}')
+        self.refresh_matrix_page(sync=False)
         self.restore_xhs_session()
 
     # ---------- 小红书会话 ----------
@@ -1010,7 +1379,13 @@ class MainWindow(QMainWindow):
         self.xhs_nickname = nickname
         if nickname:
             paths.set_xhs_nickname(cookie, nickname)
-            self.render_xhs_accounts()
+        # 恢复会话本身也证明了第一个账号可用，写进台账免得显示"未巡检"
+        if cookie:
+            paths.upsert_account(paths.account_key(cookie),
+                                 health=paths.HEALTH_OK, nickname=nickname,
+                                 health_note='')
+        self.render_xhs_accounts()
+        self.refresh_matrix_page(sync=False)
         self.set_xhs_state(True, nickname)
         self.append_log(f'小红书会话已恢复（{nickname or "Cookie 有效"}）')
 
@@ -1040,6 +1415,7 @@ class MainWindow(QMainWindow):
     def forget_xhs_session(self):
         self.auth = None
         paths.clear_xhs_cookie()
+        paths.clear_avatars()
         self.set_xhs_state(False, '')
         self.append_log('已清除小红书登录状态')
 
@@ -1160,6 +1536,10 @@ class MainWindow(QMainWindow):
         error = self._validate_spec(spec)
         if error:
             QMessageBox.warning(self, '无法开始', error)
+            return
+        if self._probe_running:
+            # 与巡检互斥：两套流程同时打接口会把风控风险叠加
+            QMessageBox.warning(self, '巡检进行中', '账号巡检正在进行，请等它结束后再开始采集。')
             return
 
         self.config['output_dir'] = spec.output_dir
@@ -1342,9 +1722,15 @@ class MainWindow(QMainWindow):
             self.restore_worker,
             getattr(self, '_check_worker', None),
             getattr(self, '_ai_test_worker', None),
+            getattr(self, '_probe_worker', None),
         ):
-            if worker is not None and worker.isRunning():
-                worker.wait(2500)
+            if worker is None or not worker.isRunning():
+                continue
+            stopper = getattr(worker, 'stop', None)
+            if callable(stopper):
+                stopper()
+            # 巡检是协作式停止：最坏等当前这个账号探测完（约 2 秒）
+            worker.wait(3500)
         try:
             if self._log_sink_id is not None:
                 logger.remove(self._log_sink_id)

@@ -28,6 +28,266 @@ def check(name: str, condition: bool, detail: str = ''):
         FAILURES.append(name)
 
 
+# ---------- 0. 账号巡检纯逻辑（无 Qt / 无网络 / 无 Node） ----------
+
+STUB_ME = {
+    'nickname': '金饰小铺',
+    'red_id': 'abc123',
+    'user_id': 'u1',
+    'imageb': 'http://cdn/avatar.jpg',
+    'guest': False,
+    'gender': 1,
+    'desc': '珠宝饰品',
+}
+
+STUB_INFO = {
+    'basic_info': {
+        'nickname': '金饰小铺',
+        'red_id': 'abc123',
+        'imageb': 'http://cdn/avatar.jpg',
+        'images': 'http://cdn/avatar.jpg',
+        'ip_location': '上海',
+        'desc': '珠宝饰品',
+        'gender': 1,
+    },
+    # 故意乱序：台账必须按 type/name 定位，不能按下标硬取
+    'interactions': [
+        {'name': '获赞与收藏', 'count': '1801', 'type': 'interaction'},
+        {'type': 'fans', 'name': '粉丝', 'count': '203'},
+        {'type': 'follows', 'name': '关注', 'count': '92'},
+    ],
+    'posted': 150,
+    'liked': 1529,
+    'collected': 272,
+    'tags': [{'name': '珠宝'}, {'name': ''}, '翡翠'],
+}
+
+
+class _StubAuth:
+    def __init__(self, fail=None):
+        self.fail = fail
+        self.user_id = 'u1'
+
+    def close(self):
+        pass
+
+
+class _StubApi:
+    def __init__(self, me=None, info=None, fail=None, guest=False):
+        self.me = me
+        self.info = info
+        self.fail = fail
+        self.guest = guest
+
+    def get_user_me(self, proxies=None):
+        if self.fail == 'me':
+            raise TimeoutError('ReadTimeout')
+        data = dict(self.me or {})
+        data['guest'] = self.guest
+        return True, '成功', {'data': data}
+
+    def get_user_info(self, user_id, proxies=None):
+        if self.fail == 'info':
+            return False, '461 风控拦截', None
+        return True, '成功', {'data': self.info}
+
+
+def _patch_probe(me=None, info=None, fail=None, guest=False, auth_exc=None):
+    """猴子补丁巡检依赖的两个类，返回还原用的原值。"""
+    import apis.xhs_pc_apis as api_mod
+    import xhs_utils.xhs_pc as pc_mod
+
+    def _from_cookie(_cookie):
+        if auth_exc is not None:
+            raise auth_exc
+        return _StubAuth(fail)
+
+    originals = (pc_mod.XHSPcAuth, api_mod.XHS_Apis)
+    pc_mod.XHSPcAuth = type('XHSPcAuth', (), {'from_cookie': staticmethod(_from_cookie)})
+    api_mod.XHS_Apis = lambda auth: _StubApi(me, info, fail, guest)
+    return originals
+
+
+def test_account_probe():
+    from desktop import account_probe as probe
+    from desktop import paths
+
+    originals = _patch_probe(STUB_ME, STUB_INFO)
+    try:
+        result = probe.probe_account('web_session=x', full=True, download_avatar=False)
+        check('巡检正常态判为 ok', result['health'] == paths.HEALTH_OK,
+              f"health={result['health']}")
+        check('巡检解析粉丝/关注/获赞（乱序 interactions）',
+              result.get('fans') == 203 and result.get('follows') == 92
+              and result.get('interaction') == 1801, str(result)[:200])
+        check('巡检解析发布/赞过/收藏',
+              result.get('posted') == 150 and result.get('liked') == 1529
+              and result.get('collected') == 272)
+        check('巡检解析 IP 属地与标签',
+              result.get('ip_location') == '上海' and result.get('tags') == ['珠宝', '翡翠'],
+              str(result.get('tags')))
+        check('巡检解析性别与小红书号',
+              result.get('gender') == '女' and result.get('red_id') == 'abc123')
+        check('巡检带出 user_id 与昵称',
+              result.get('user_id') == 'u1' and result.get('nickname') == '金饰小铺')
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    originals = _patch_probe(STUB_ME, STUB_INFO, guest=True)
+    try:
+        result = probe.probe_account('web_session=x', full=True, download_avatar=False)
+        check('guest=True 判为登录失效（关键：success 仍为 true）',
+              result['health'] == paths.HEALTH_EXPIRED, f"health={result['health']}")
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    originals = _patch_probe(STUB_ME, STUB_INFO, fail='me')
+    try:
+        result = probe.probe_account('web_session=x', full=True, download_avatar=False)
+        check('请求超时判为网络异常', result['health'] == paths.HEALTH_NETWORK,
+              f"health={result['health']}")
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    originals = _patch_probe(STUB_ME, STUB_INFO, auth_exc=ValueError(
+        'XHSPcAuth.cookies must contain a1; use a saved local login Cookie'))
+    try:
+        result = probe.probe_account('bad', full=True, download_avatar=False)
+        check('Cookie 缺 a1 判为登录失效', result['health'] == paths.HEALTH_EXPIRED,
+              f"health={result['health']}")
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    originals = _patch_probe(STUB_ME, STUB_INFO, fail='info')
+    try:
+        result = probe.probe_account('web_session=x', full=True, download_avatar=False)
+        check('资产接口失败不改健康状态（身份已确认）',
+              result['health'] == paths.HEALTH_OK, f"health={result['health']}")
+        check('资产接口失败留下备注', '资产数据获取失败' in result.get('health_note', ''))
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    originals = _patch_probe(STUB_ME, {})
+    try:
+        result = probe.probe_account('web_session=x', full=True, download_avatar=False)
+        check('资产接口返回空 dict 不抛 KeyError',
+              result['health'] == paths.HEALTH_OK and result.get('fans') == 0
+              and result.get('posted') == 0)
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    originals = _patch_probe(STUB_ME, STUB_INFO)
+    try:
+        result = probe.probe_account('web_session=x', full=False, download_avatar=False)
+        check('快速模式只验会话、不带资产',
+              result['health'] == paths.HEALTH_OK and 'fans' not in result)
+        check('空 Cookie 直接判失效',
+              probe.probe_account('', full=True)['health'] == paths.HEALTH_EXPIRED)
+    finally:
+        import apis.xhs_pc_apis as api_mod
+        import xhs_utils.xhs_pc as pc_mod
+        pc_mod.XHSPcAuth, api_mod.XHS_Apis = originals
+
+    # parse_user_info 纯函数：接口结构变化时的容错
+    parsed = probe.parse_user_info({}, 'u9')
+    check('parse_user_info 空输入不抛异常',
+          parsed['fans'] == 0 and parsed['nickname'] == '' and parsed['user_id'] == 'u9')
+    check('_as_int 解析 K/万 后缀',
+          probe._as_int('1.8K') == 1800 and probe._as_int('2万') == 20000
+          and probe._as_int(None) == 0 and probe._as_int(True) == 0,
+          f"{probe._as_int('1.8K')}/{probe._as_int('2万')}")
+    check('classify_message 区分风控与网络',
+          probe.classify_message('461 风控') == paths.HEALTH_LIMITED
+          and probe.classify_message('connection reset') == paths.HEALTH_NETWORK)
+
+
+def test_account_ledger(tmp_dir=None):
+    """台账读写：用临时目录替换路径常量，绝不碰真实 ~/.xhs_spider。"""
+    import tempfile
+    from pathlib import Path
+
+    from desktop import paths
+
+    saved = (paths.ACCOUNTS_FILE, paths.AVATAR_DIR, paths.COOKIES_FILE)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        paths.ACCOUNTS_FILE = root / 'xhs_accounts.json'
+        paths.AVATAR_DIR = root / 'avatars'
+        paths.COOKIES_FILE = root / 'xhs_cookies.json'
+        try:
+            check('台账文件不存在时返回空结构',
+                  paths.load_accounts() == {'version': 1, 'accounts': {}, 'history': {}})
+
+            paths.save_xhs_cookies([
+                {'cookie': 'a1=1; web_session=s1', 'nickname': '甲'},
+                {'cookie': 'a1=1; web_session=s2', 'nickname': '乙'},
+            ])
+            ledger = paths.sync_accounts_from_pool()
+            check('同步池 -> 台账补空条目', len(ledger['accounts']) == 2)
+            check('新条目健康状态为未巡检',
+                  ledger['accounts']['s1']['health'] == paths.HEALTH_UNKNOWN)
+
+            record = paths.upsert_account(
+                's1', health=paths.HEALTH_OK, user_id='u1', nickname='甲',
+                fans=100, follows=5, interaction=999, posted=7)
+            check('upsert 写入资产字段', record['fans'] == 100 and record['posted'] == 7)
+            check('upsert 记录巡检时间', bool(record['checked_at']))
+            check('upsert 写入历史快照',
+                  paths.load_accounts()['history'].get('u1', [{}])[0].get('fans') == 100)
+
+            # 空值不覆盖已有值（快速模式不刷新资产，不该把粉丝清零）
+            record = paths.upsert_account('s1', health=paths.HEALTH_OK, nickname='')
+            check('空字段不覆盖已有值', record['fans'] == 100 and record['nickname'] == '甲')
+
+            # 同一天重复巡检只留一条历史
+            paths.upsert_account('s1', health=paths.HEALTH_OK, user_id='u1', fans=120)
+            history = paths.load_accounts()['history']['u1']
+            check('同一天历史只留一条且取最新值',
+                  len(history) == 1 and history[0]['fans'] == 120, str(history))
+
+            record = paths.upsert_account('s2', health=paths.HEALTH_NETWORK)
+            check('失败累计次数据递增', record['consecutive_failures'] == 1)
+            record = paths.upsert_account('s2', health=paths.HEALTH_OK)
+            check('恢复后失败计数归零', record['consecutive_failures'] == 0)
+
+            paths.save_xhs_cookies([{'cookie': 'a1=1; web_session=s2', 'nickname': '乙'}])
+            ledger = paths.sync_accounts_from_pool()
+            check('池里删掉的账号从台账移除', 's1' not in ledger['accounts'])
+            check('移除账号连带清历史', 'u1' not in paths.load_accounts()['history'])
+
+            check('按主键取回 cookie',
+                  paths.account_cookie('s2') == 'a1=1; web_session=s2')
+            check('主键回退到 Cookie 池',
+                  paths.account_cookie('s2') != '' and paths.account_key_of(
+                      {'cookie': 'a1=1; web_session=s2'}) == 's2')
+
+            saved_path = paths.save_avatar('u2', b'\xff\xd8\xff\xe0fake')
+            check('头像写入缓存目录', bool(saved_path) and paths.avatar_path('u2').exists())
+            paths.upsert_account('s2', health=paths.HEALTH_OK, user_id='u2')
+            paths.remove_accounts(['s2'])
+            check('删除台账条目连带删头像', not paths.avatar_path('u2').exists())
+            check('删除台账条目连带清历史',
+                  'u2' not in paths.load_accounts()['history'])
+
+            paths.save_accounts({'version': 1, 'accounts': 'garbage', 'history': None})
+            check('台账结构损坏时不抛异常', paths.load_accounts()['accounts'] == {})
+        finally:
+            paths.ACCOUNTS_FILE, paths.AVATAR_DIR, paths.COOKIES_FILE = saved
+
+
+
 # ---------- 1. 桩服务器 + AuthClient ----------
 
 STUB_USERS = {
@@ -131,13 +391,30 @@ def test_auth_client():
 # ---------- 2. 无头 GUI 装配 ----------
 
 def test_gui():
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QTabWidget
 
     from desktop import paths as dpaths
+    from desktop import main_window as mw
     from desktop.login_dialog import LoginDialog
-    from desktop.main_window import MainWindow
+    from desktop.main_window import NAV_MATRIX, MainWindow
 
     dpaths.load_xhs_cookies = lambda: [{'cookie': 'web_session=selftest', 'nickname': '测试号'}]
+    # 台账相关一律走内存：自检绝不能写真实的 ~/.xhs_spider
+    fake_ledger = {'version': 1, 'accounts': {}, 'history': {}}
+
+    def _load_accounts():
+        return {
+            'version': 1,
+            'accounts': {k: dict(v) for k, v in fake_ledger['accounts'].items()},
+            'history': {k: list(v) for k, v in fake_ledger['history'].items()},
+        }
+
+    dpaths.load_accounts = _load_accounts
+    dpaths.sync_accounts_from_pool = lambda: {'sync': True}
+    dpaths.upsert_account = lambda key, **fields: fake_ledger['accounts'].setdefault(key, fields)
+    dpaths.remove_accounts = lambda keys: None
+    dpaths.clear_avatars = lambda: None
 
     app = QApplication.instance() or QApplication([])
     login = LoginDialog({'server': 'http://demo', 'username': 'alice'})
@@ -226,6 +503,75 @@ def test_gui():
           '仅支持导出 Excel' in window._validate_spec(window._current_spec()))
     window.excel_check.setChecked(True)
     window.tabs.setCurrentIndex(0)
+    # 账号矩阵页：台账表格、统计卡、池同步
+    check('矩阵页已替换为台账页', hasattr(window, 'matrix_table'))
+    check('台账表格列数正确', window.matrix_table.columnCount() == 9,
+          str(window.matrix_table.columnCount()))
+    check('账号矩阵导航已移除 soon 徽标',
+          window.nav_buttons[NAV_MATRIX].text() == '账号矩阵')
+
+    fake_ledger['accounts'] = {
+        's1': {'key': 's1', 'cookie': 'web_session=s1', 'nickname': '甲',
+               'red_id': 'r1', 'health': 'ok', 'fans': 100, 'follows': 5,
+               'interaction': 999, 'posted': 7, 'ip_location': '上海',
+               'checked_at': '2026-10-03 12:00:00'},
+        's2': {'key': 's2', 'cookie': 'web_session=s2', 'nickname': '乙',
+               'health': 'expired', 'checked_at': '2026-10-03 12:30:00'},
+        's3': {'key': 's3', 'cookie': 'web_session=s3', 'nickname': '丙',
+               'health': 'unknown', 'checked_at': ''},
+    }
+    window.refresh_matrix_page(sync=False)
+    check('台账渲染 3 行', window.matrix_table.rowCount() == 3,
+          str(window.matrix_table.rowCount()))
+    check('统计卡：账号总数', window.stat_accounts.text() == '3 个',
+          window.stat_accounts.text())
+    check('统计卡：健康 1 个', window.stat_healthy.text() == '1 个',
+          window.stat_healthy.text())
+    check('统计卡：异常 1 个', window.stat_broken.text() == '1 个',
+          window.stat_broken.text())
+    check('统计卡：总粉丝只算正常账号', window.stat_fans.text() == '100',
+          window.stat_fans.text())
+    check('异常账号排在正常账号之前',
+          window.matrix_table.cellWidget(0, 2).text() == '登录失效',
+          window.matrix_table.cellWidget(0, 2).text())
+    check('未巡检账号显示占位而非 0',
+          any(window.matrix_table.item(r, 3).text() == '—'
+              for r in range(window.matrix_table.rowCount())),
+          str([window.matrix_table.item(r, 3).text()
+               for r in range(window.matrix_table.rowCount())]))
+    check('巡检按钮可用（无巡检在跑）',
+          window.probe_fast_btn.isEnabled() and window.probe_full_btn.isEnabled())
+    check('台账行主键可从表格取回（用于双击打开主页）',
+          window.matrix_table.item(0, 1).data(Qt.UserRole) == 's2',
+          str(window.matrix_table.item(0, 1).data(Qt.UserRole)))
+    # 双击打开主页：第 0 列是 cellWidget，若误从第 0 列取 item 会拿不到主键
+    opened = []
+    original_open = mw.QDesktopServices
+
+    class _FakeDesktopServices:
+        @staticmethod
+        def openUrl(url):
+            opened.append(url.toString())
+
+    mw.QDesktopServices = _FakeDesktopServices
+    try:
+        fake_ledger['accounts']['s1']['user_id'] = 'u-abc'
+        window.refresh_matrix_page(sync=False)
+        row_s1 = next(r for r in range(window.matrix_table.rowCount())
+                      if window.matrix_table.item(r, 1).data(Qt.UserRole) == 's1')
+        window.open_current_account(window.matrix_table.model().index(row_s1, 0))
+        check('双击台账行打开主页', opened == [
+            'https://www.xiaohongshu.com/user/profile/u-abc'], str(opened))
+    finally:
+        mw.QDesktopServices = original_open
+    check('设置页有自动巡检开关', window.probe_auto_check.isChecked())
+    window.probe_auto_check.setChecked(False)
+    check('关闭自动巡检会停止定时器', not window._probe_timer.isActive())
+    window.probe_auto_check.setChecked(True)
+    window.switch_page(NAV_MATRIX)
+    check('切到矩阵页不改动采集页签', window.pages.currentIndex() == NAV_MATRIX)
+    window.switch_page(0)
+
     window.deleteLater()
     app.processEvents()
 
@@ -639,6 +985,8 @@ def test_should_collect():
 
 if __name__ == '__main__':
     test_auth_client()
+    test_account_probe()
+    test_account_ledger()
     test_gui()
     test_task_spec()
     test_xiaolvsu_zip()

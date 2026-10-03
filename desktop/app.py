@@ -178,6 +178,11 @@ QPushButton#navSubItem {
 }
 QPushButton#navSubItem:hover { background-color: #f5f4fc; color: #5b4bd0; }
 QLabel#accountDot { background-color: #2fbf8f; border-radius: 3px; }
+QLabel#accountDotOk { background-color: #2fbf8f; border-radius: 3px; }
+QLabel#accountDotExpired { background-color: #e05a4e; border-radius: 3px; }
+QLabel#accountDotLimited { background-color: #ef7d4e; border-radius: 3px; }
+QLabel#accountDotNetwork { background-color: #f9a03f; border-radius: 3px; }
+QLabel#accountDotUnknown { background-color: #c9ced6; border-radius: 3px; }
 QLabel#accountName { font-size: 12px; color: #555b66; }
 QLabel#navSection {
     color: #9aa0a6;
@@ -248,6 +253,47 @@ QFrame#statCard1 QLabel, QFrame#statCard2 QLabel, QFrame#statCard3 QLabel {
 }
 QLabel#statLabel { font-size: 11px; color: rgba(255,255,255,0.78); }
 QLabel#statValue { font-size: 19px; font-weight: 700; }
+
+/* ============ 账号矩阵：统计卡 + 健康状态 ============ */
+QFrame#statCard4, QFrame#statCard5, QFrame#statCard6, QFrame#statCard7 {
+    border: none;
+    border-radius: 14px;
+}
+QFrame#statCard4 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #8a7bf5, stop:0.6 #6c5ce7, stop:1 #a78bfa);
+}
+QFrame#statCard5 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #4ec9a0, stop:0.65 #2fbf8f, stop:1 #4ec9d4);
+}
+QFrame#statCard6 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #f9a03f, stop:0.6 #ef7d4e, stop:1 #e05a4e);
+}
+QFrame#statCard7 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #6c5ce7, stop:0.6 #5a4bd0, stop:1 #4ec9d4);
+}
+QFrame#statCard4 QLabel, QFrame#statCard5 QLabel,
+QFrame#statCard6 QLabel, QFrame#statCard7 QLabel {
+    color: #ffffff;
+    background: transparent;
+}
+QLabel#healthOk { color: #2fbf8f; font-size: 12px; font-weight: 600; }
+QLabel#healthExpired { color: #e05a4e; font-size: 12px; font-weight: 600; }
+QLabel#healthLimited { color: #ef7d4e; font-size: 12px; font-weight: 600; }
+QLabel#healthNetwork { color: #f9a03f; font-size: 12px; font-weight: 600; }
+QLabel#healthUnknown { color: #9aa0a6; font-size: 12px; }
+QTableWidget#accountTable {
+    background-color: #ffffff;
+    border: 1px solid #edeff3;
+    border-radius: 14px;
+    gridline-color: #f4f5f8;
+    alternate-background-color: #fafbfd;
+}
+QTableWidget#accountTable::item { padding: 6px 6px; }
+QTableWidget#accountTable::item:selected { background-color: #eeecfb; color: #2d3436; }
 
 /* ============ 页签 ============ */
 QTabWidget#collectTabs::pane {
