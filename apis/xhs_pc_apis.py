@@ -1433,27 +1433,25 @@ class XHS_Apis():
             获取笔记无水印图片
             :param img_url: 你想要获取的图片的url
             返回笔记无水印图片
+
+        图床直链形如（实测 2026-10）：
+            http://sns-webpic-qc.xhscdn.com/<date>/<hash>/<assets...>!nd_dft_wlteh_webp_3
+        其中 <date>/<hash> 两段是当次签发的缓存前缀，同一资产在不同次请求里会变；
+        资产真实路径是其后到 `!` 之前的部分（notes_pre_post/xxx、oss-ae/notes/xxx、
+        spectrum/xxx、或无前缀的裸 token）。ci.xiaohongshu.com 只认资产真实路径，
+        因此统一规则是「去掉前两段，保留其余」，比逐种前缀分支覆盖更全。
         """
         success = True
         msg = '成功'
         new_url = None
         try:
-            # 新版图片资源优先保留 notes_pre_post token，使用 ci.xiaohongshu.com 输出 JPEG。
-            # 例：
-            # https://sns-webpic-qc.xhscdn.com/<time>/<hash>/notes_pre_post/<img_id>!nd_dft_wlteh_webp_3
-            # -> https://ci.xiaohongshu.com/notes_pre_post/<img_id>?imageView2/format/jpeg
-            if 'notes_pre_post/' in img_url:
-                token = 'notes_pre_post/' + img_url.split('notes_pre_post/', 1)[1].split('!', 1)[0].split('?', 1)[0]
-                new_url = f'https://ci.xiaohongshu.com/{token}?imageView2/format/jpeg'
-            elif 'spectrum' in img_url:
-                token = '/'.join(img_url.split('/')[-2:]).split('!', 1)[0].split('?', 1)[0]
-                new_url = f'https://ci.xiaohongshu.com/{token}?imageView2/format/jpeg'
-            elif '.jpg' in img_url:
-                token = '/'.join([split for split in img_url.split('/')[-3:]]).split('!', 1)[0].split('?', 1)[0]
-                new_url = f'https://ci.xiaohongshu.com/{token}?imageView2/format/jpeg'
-            else:
-                token = img_url.split('/')[-1].split('!', 1)[0].split('?', 1)[0]
-                new_url = f'https://ci.xiaohongshu.com/{token}?imageView2/format/jpeg'
+            from urllib.parse import urlparse
+            path = urlparse(img_url).path.split('!', 1)[0]
+            segments = [seg for seg in path.split('/') if seg]
+            tail = segments[2:] if len(segments) > 2 else segments
+            if not tail:
+                raise ValueError(f'无法解析图片路径: {img_url}')
+            new_url = f"https://ci.xiaohongshu.com/{'/'.join(tail)}?imageView2/format/jpeg"
         except Exception as e:
             success = False
             msg = _log_api_error(e)

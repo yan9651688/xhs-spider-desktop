@@ -451,6 +451,7 @@ def test_gui():
     check('评论模式隐藏媒体/打包/AI 选项',
           window.img_check.isHidden() and window.video_check.isHidden()
           and window.zip_check.isHidden() and window.ai_check.isHidden()
+          and window.no_water_check.isHidden()
           and not window.excel_check.isHidden())
     window.excel_check.setChecked(False)
     check('评论模式未勾 Excel 被拦截',
@@ -459,7 +460,13 @@ def test_gui():
     window.tabs.setCurrentIndex(0)
     check('切回搜索页恢复媒体选项',
           not window.img_check.isHidden() and not window.zip_check.isHidden()
-          and not window.ai_check.isHidden())
+          and not window.ai_check.isHidden() and not window.no_water_check.isHidden())
+    check('无水印开关默认不勾选且能进 spec',
+          window.no_water_check.isChecked() is False
+          and window._current_spec().no_watermark is False)
+    window.no_water_check.setChecked(True)
+    check('勾选后 spec.no_watermark 为 True', window._current_spec().no_watermark is True)
+    window.no_water_check.setChecked(False)
 
     # 收藏采集页签：模式解析、类型切换、校验
     window.tabs.setCurrentIndex(4)
@@ -572,6 +579,53 @@ def test_gui():
     check('切到矩阵页不改动采集页签', window.pages.currentIndex() == NAV_MATRIX)
     window.switch_page(0)
 
+    # 粉丝增长曲线：数据来自台账 history，无历史时显示占位而不是假曲线
+    check('曲线卡片已装配', hasattr(window, 'chart_account_combo')
+          and hasattr(window, 'chart_metric_combo'))
+    window.refresh_chart()
+    check('无历史时显示占位文案', window.chart_placeholder.isVisible()
+          or not window.chart_placeholder.isHidden())
+    check('无历史时只有合计一个选项',
+          window.chart_account_combo.count() == 1
+          and window.chart_account_combo.currentData() == '__all__',
+          str(window.chart_account_combo.count()))
+
+    fake_ledger['history'] = {
+        'u1': [{'date': '2026-10-01', 'fans': 100, 'interaction': 10, 'posted': 5},
+               {'date': '2026-10-03', 'fans': 130, 'interaction': 40, 'posted': 6}],
+        'u2': [{'date': '2026-10-01', 'fans': 50, 'interaction': 5, 'posted': 2},
+               {'date': '2026-10-04', 'fans': 70, 'interaction': 9, 'posted': 3}],
+    }
+    fake_ledger['accounts']['s1']['user_id'] = 'u1'
+    fake_ledger['accounts']['s2']['user_id'] = 'u2'
+    window.refresh_chart()
+    check('有历史后列出合计 + 两个账号',
+          window.chart_account_combo.count() == 3,
+          str([window.chart_account_combo.itemData(i)
+               for i in range(window.chart_account_combo.count())]))
+    check('账号选项用昵称而非 user_id',
+          window.chart_account_combo.itemText(1) in ('甲', '乙'),
+          window.chart_account_combo.itemText(1))
+    check('曲线摘要含天数与增量',
+          '3 天' in window.chart_summary.text() and '+50' in window.chart_summary.text(),
+          window.chart_summary.text())
+    if mw.HAS_QTCHARTS:
+        check('有数据时显示折线图并隐藏占位',
+              window.chart_view.isHidden() is False
+              and window.chart_placeholder.isHidden() is True)
+        chart = window.chart_view.chart()
+        check('折线图渲染 2 个账号的曲线',
+              len(chart.series()) >= 1,
+              str(len(chart.series())))
+    # 切到单账号 + 换指标：合计 150 -> 单账号 100 起
+    window.chart_account_combo.setCurrentIndex(
+        window.chart_account_combo.findData('u1'))
+    window.chart_metric_combo.setCurrentIndex(
+        window.chart_metric_combo.findData('interaction'))
+    check('切账号切指标后摘要跟着变',
+          '10' in window.chart_summary.text() and '40' in window.chart_summary.text(),
+          window.chart_summary.text())
+
     window.deleteLater()
     app.processEvents()
 
@@ -588,8 +642,176 @@ def test_task_spec():
     spec = TaskSpec(save_images=False, save_videos=False, save_excel=True)
     check('不保存媒体时 save_choice 为空', spec.save_choice == '' and not spec.want_media)
     check('小绿书打包默认开启', TaskSpec().zip_export is True)
+    check('无水印默认关闭', TaskSpec().no_watermark is False)
     check('任务名清洗非法字符', sanitize_name('a/b:c*?') == 'a_b_c_')
     check('空任务名回退时间戳', len(sanitize_name('   ')) >= 8)
+
+
+def test_media_pickers():
+    """图片/视频直链选择：字段顺序变化与旧字段漂移的回归防护。"""
+    from xhs_utils.data_util import _original_image_url, _pick_image_url, _pick_video_addr
+
+    scene = {'info_list': [
+        {'image_scene': 'WB_PRV', 'url': 'http://cdn/small!nd_prv'},
+        {'image_scene': 'WB_DFT', 'url': 'http://cdn/202601010000/abcdef/notes_pre_post/big!nd_dft_wlteh_webp_3'},
+    ]}
+    check('优先取 WB_DFT 直链，返回可下载的默认直链',
+          _pick_image_url(scene) == 'http://cdn/202601010000/abcdef/notes_pre_post/big!nd_dft_wlteh_webp_3')
+    check('原图改写走 ci.xiaohongshu.com（去掉 /{date}/{hash}/ 前缀）',
+          _original_image_url(_pick_image_url(scene))
+          == 'https://ci.xiaohongshu.com/notes_pre_post/big?imageView2/format/jpeg')
+    check('原图改写覆盖 oss-ae 前缀',
+          _original_image_url('http://cdn/202601010000/abcdef/oss-ae/notes/tok!nd_dft')
+          == 'https://ci.xiaohongshu.com/oss-ae/notes/tok?imageView2/format/jpeg')
+    check('原图改写覆盖裸 token（无资产目录）',
+          _original_image_url('http://cdn/202601010000/abcdef/tok!nd_dft')
+          == 'https://ci.xiaohongshu.com/tok?imageView2/format/jpeg')
+    check('解析不出路径时返回空串（由调用方兜底）', _original_image_url('') == '')
+    check('缺 image_scene 时回退下标 1',
+          _pick_image_url({'info_list': [{'url': 'a'}, {'url': 'b'}]}) == 'b')
+    check('只有一条时取该条', _pick_image_url({'info_list': [{'url': 'only'}]}) == 'only')
+    check('info_list 缺失返回空串', _pick_image_url({}) == '')
+
+    streams = {'media': {'stream': {
+        'EF5': [{'width': 720, 'height': 1280, 'master_url': 'ef5-small'},
+                {'width': 1080, 'height': 1920, 'master_url': 'ef5-hd'}],
+        'EF4': [{'width': 720, 'height': 1280, 'master_url': 'ef4'}],
+        'EF6': [], 'EF7': [],
+    }}}
+    check('视频优先 EF5 且取同键内最大分辨率', _pick_video_addr(streams) == 'ef5-hd')
+    check('仅 EF4 时回退 EF4',
+          _pick_video_addr({'media': {'stream': {'EF4': [{'url': 'only-ef4'}]}}}) == 'only-ef4')
+    check('兼容旧 h264 字段',
+          _pick_video_addr({'media': {'stream': {'h264': [{'url': 'old'}]}}}) == 'old')
+    check('已废弃的 consumer 不再当兜底', _pick_video_addr({'consumer': {'origin_video_key': 'k'}}) is None)
+    check('视频字段全空返回 None', _pick_video_addr({}) is None)
+
+
+def test_account_history():
+    """粉丝增长曲线的纯数据层：前向填充、缺日、空台账。"""
+    from desktop.account_history import account_options, build_series, growth_summary
+
+    empty = {'version': 1, 'accounts': {}, 'history': {}}
+    check('空台账：只有合计选项', account_options(empty) == [('__all__', '全部账号合计')])
+    check('空台账：序列为空且摘要不编造增长',
+          build_series(empty) == [] and growth_summary([])['delta'] is None)
+
+    ledger = {
+        'accounts': {
+            'k1': {'key': 'k1', 'user_id': 'u1', 'nickname': '甲'},
+            'k2': {'key': 'k2', 'user_id': 'u2'},   # 无昵称 -> 退回 user_id 前缀
+        },
+        'history': {
+            'u1': [{'date': '2026-10-01', 'fans': 100, 'interaction': 10, 'posted': 5},
+                   {'date': '2026-10-03', 'fans': 130, 'interaction': 40, 'posted': 6}],
+            'u2': [{'date': '2026-10-01', 'fans': 50, 'interaction': 5, 'posted': 2},
+                   {'date': '2026-10-04', 'fans': 70, 'interaction': 9}],
+        },
+    }
+    options = dict(account_options(ledger))
+    check('选项用昵称，缺昵称退回 user_id 前缀',
+          options.get('u1') == '甲' and options.get('u2', '').startswith('账号 u2'))
+
+    single = build_series(ledger, 'u1')
+    check('单账号序列只含自己的点',
+          single == [('2026-10-01', 100), ('2026-10-03', 130)], str(single))
+    check('单账号摘要增量 = 末 - 首', growth_summary(single)['delta'] == 30)
+
+    total = build_series(ledger)   # 合计
+    check('合计对缺日账号做前向填充（不凭空掉粉）',
+          total == [('2026-10-01', 150), ('2026-10-03', 180), ('2026-10-04', 200)],
+          str(total))
+    fill_edge = {'accounts': {}, 'history': {
+        # u2 首条快照晚于 u1：在 10-01 这天不该被算成 0 后仍计入
+        'u1': [{'date': '2026-10-01', 'fans': 10}, {'date': '2026-10-02', 'fans': 12}],
+        'u2': [{'date': '2026-10-02', 'fans': 7}],
+    }}
+    check('账号首条快照之前不计入合计',
+          build_series(fill_edge) == [('2026-10-01', 10), ('2026-10-02', 19)],
+          str(build_series(fill_edge)))
+    check('缺字段按 0 处理且不抛异常',
+          build_series(ledger, 'u2', 'posted')[-1] == ('2026-10-04', 0))
+    check('未知指标回退为粉丝数',
+          build_series(ledger, 'u1', 'nope') == single)
+
+
+def test_xhs_login_dialog():
+    """Cookie 导入的本地校验：字段整理与必填判断（不联网）。"""
+    from desktop.xhs_login_dialog import (
+        is_valid_cookie,
+        missing_cookie_fields,
+        normalize_cookie_text,
+    )
+
+    check('整行 Cookie 前缀被剥掉',
+          normalize_cookie_text('Cookie: a1=x; web_session=y') == 'a1=x; web_session=y')
+    check('多行粘贴整理为分号分隔',
+          normalize_cookie_text('a1=x\nweb_session=y') == 'a1=x; web_session=y')
+    check('空输入返回空串', normalize_cookie_text('   ') == '')
+
+    check('完整 Cookie 通过校验',
+          is_valid_cookie('a1=x; web_session=y') and missing_cookie_fields('a1=x; web_session=y') == [])
+    check('缺 web_session 被识别',
+          missing_cookie_fields('a1=x; gid=z') == ['web_session'])
+    check('缺 a1 被识别', missing_cookie_fields('web_session=y') == ['a1'])
+    check('空 Cookie 两个字段都缺',
+          missing_cookie_fields('') == ['a1', 'web_session'])
+    check('空值不算命中（a1= 视为缺失）',
+          'a1' in missing_cookie_fields('a1=; web_session=y'))
+    check('Cookie 值里含 = 也能正确切分',
+          is_valid_cookie('a1=x=y; web_session=a=b'))
+
+
+def test_no_watermark_download():
+    """无水印下载：原图直链优先、失败回退默认直链（不联网，桩掉 requests）。"""
+    import tempfile
+
+    import xhs_utils.data_util as du
+
+    IMG = 'http://cdn/202601010000/abcdef/notes_pre_post/tok!nd_dft_wlteh_webp_3'
+    note = {
+        'note_id': 'n1', 'note_url': 'https://www.xiaohongshu.com/explore/n1',
+        'user_id': 'u1', 'title': '标题', 'nickname': '作者',
+        'note_type': '图集', 'image_list': [IMG], 'tags': [], 'upload_time': '',
+        'ip_location': '', 'desc': '', 'home_url': '', 'avatar': '',
+        'liked_count': '', 'collected_count': '', 'comment_count': '',
+        'share_count': '', 'video_cover': None, 'video_addr': None,
+        'image_list_original': ['https://ci.xiaohongshu.com/notes_pre_post/tok?imageView2/format/jpeg'],
+    }
+
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        content = b'x'
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size=0): return [b'x']
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        if 'ci.xiaohongshu.com' in url:
+            raise RuntimeError('404')
+        return _Resp()
+
+    orig_get, orig_media = du.requests.get, du.download_media
+    du.requests.get = fake_get
+    try:
+        tmp = tempfile.mkdtemp()
+        # download_media 走真实实现（只被桩掉 requests.get）
+        du.download_note(note, tmp, 'media-image', no_watermark=True)
+        check('原图失败时回退默认直链', calls[0].startswith('https://ci.xiaohongshu.com/')
+              and calls[-1] == IMG, str(calls))
+        calls.clear()
+        du.download_note(note, tmp, 'media-image', no_watermark=False)
+        check('未开无水印只请求默认直链', calls == [IMG], str(calls))
+    finally:
+        du.requests.get, du.download_media = orig_get, orig_media
+
+    # 新老数据都要能跑：缺 image_list_original 键不报错
+    legacy = dict(note); legacy.pop('image_list_original')
+    tmp2 = tempfile.mkdtemp()
+    du.download_note(legacy, tmp2, '', no_watermark=True)
+    check('旧数据缺 image_list_original 不报错', True)
 
 
 # ---------- 4. 小绿书 zip 导出 ----------
@@ -989,6 +1211,10 @@ if __name__ == '__main__':
     test_account_ledger()
     test_gui()
     test_task_spec()
+    test_media_pickers()
+    test_account_history()
+    test_xhs_login_dialog()
+    test_no_watermark_download()
     test_xiaolvsu_zip()
     test_ai_parse()
     test_comment_collection()

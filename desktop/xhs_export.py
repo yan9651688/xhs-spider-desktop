@@ -21,6 +21,22 @@ from desktop.spider_service import sanitize_name
 IMAGE_TIMEOUT = 20
 
 
+def _original_image_url(url: str) -> str:
+    """把图床直链重写为 ci.xiaohongshu.com 原图直链；失败时原样返回。
+
+    纯字符串改写（复用 XHS_Apis.get_note_no_water_img），不产生额外网络请求；
+    实测返回的是更高分辨率资产，而不是同一张图的另一份压缩拷贝。
+    """
+    try:
+        from apis.xhs_pc_apis import XHS_Apis
+        success, _msg, new_url = XHS_Apis.get_note_no_water_img(url)
+        if success and new_url:
+            return new_url
+    except Exception as exc:
+        logger.debug(f'原图直链改写失败，回退原 url：{exc}')
+    return url
+
+
 def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
     """下载图片并规范化保存为 {index}.jpg（webp/png 统一转 JPEG，保证 xiao 端扩展名过滤通过）。"""
     try:
@@ -38,11 +54,14 @@ def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
 
 
 def export_note_folder(note: dict, base_dir: str, should_stop=None,
-                       progress=None, used_names: set | None = None) -> str | None:
+                       progress=None, used_names: set | None = None,
+                       no_watermark: bool = False) -> str | None:
     """把一篇笔记导出为 {标题}/ 文件夹，返回文件夹路径；无图返回 None。
 
     文件夹名即上传后的文章标题（xiao 对无 ID 前缀的文件夹取全名当标题）；
     同名笔记自动追加 _2、_3 序号避免 zip 内互相覆盖。
+
+    no_watermark=True 时把每张图重写为 ci.xiaohongshu.com 原图直链（更高分辨率）。
     """
     title = note.get('title_ai') or note.get('title') or '无标题'
     base = sanitize_name(title).strip('_') or '无标题'
@@ -61,7 +80,14 @@ def export_note_folder(note: dict, base_dir: str, should_stop=None,
     for index, url in enumerate(images, start=1):
         if should_stop is not None and should_stop():
             break
-        if _download_as_jpg(url, folder, index):
+        candidates = [url]
+        if no_watermark:
+            # 优先抓取阶段算好的原图直链；旧任务数据没有时本地补算。
+            # 原图路径对部分资产不提供服务（404），失败回退默认直链。
+            original = list(note.get('image_list_original') or [])
+            candidate = original[index - 1] if index - 1 < len(original) else ''
+            candidates = [candidate or _original_image_url(url), url]
+        if any(_download_as_jpg(u, folder, index) for u in candidates if u):
             saved += 1
         if progress is not None:
             progress(index, len(images))
@@ -76,7 +102,8 @@ def export_note_folder(note: dict, base_dir: str, should_stop=None,
 
 
 def export_xiaolvsu_zip(note_list: list, out_dir: str, task_name: str,
-                        should_stop=None, emit=None) -> str | None:
+                        should_stop=None, emit=None,
+                        no_watermark: bool = False) -> str | None:
     """把整批笔记打包成一个小绿书 zip，返回 zip 路径。"""
     import time
 
@@ -92,7 +119,8 @@ def export_xiaolvsu_zip(note_list: list, out_dir: str, task_name: str,
         if should_stop is not None and should_stop():
             break
         folder = export_note_folder(note, folders_dir, should_stop,
-                                    progress=None, used_names=used_names)
+                                    progress=None, used_names=used_names,
+                                    no_watermark=no_watermark)
         if folder is None:
             if emit:
                 emit.log(f"跳过无图片笔记：{(note.get('title_ai') or note.get('title') or '')[:20]}")

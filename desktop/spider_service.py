@@ -32,6 +32,7 @@ class TaskSpec:
     save_videos: bool = True
     save_excel: bool = True
     zip_export: bool = True         # 导出小绿书 zip（xiao 赛道上传格式）
+    no_watermark: bool = False      # 图片走 ci.xiaohongshu.com 原图直链（默认关：请求更多、非官方保证）
     ai_cfg: dict = field(default_factory=dict)   # 非空时抓取后逐篇 AI 改写
     delay_seconds: float = 2.0      # 每篇间隔（防风控限速），0=不限速
     task_name: str = ''
@@ -137,7 +138,7 @@ def _throttle(delay: float, should_stop) -> None:
         time.sleep(0.2)
 
 
-def _spider_note(api, url: str):
+def _spider_note(api, url: str, no_watermark: bool = False):
     """单篇抓取（复用 Data_Spider.spider_note 的逻辑，支持指定 api 实例做账号轮询）。"""
     from xhs_utils.data_util import handle_note_info
 
@@ -146,7 +147,7 @@ def _spider_note(api, url: str):
         if success:
             item = data['data']['items'][0]
             item['url'] = url
-            return True, msg, handle_note_info(item)
+            return True, msg, handle_note_info(item, no_watermark=no_watermark)
         return success, msg, None
     except Exception as exc:
         return False, exc, None
@@ -414,6 +415,8 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
         emit.log(f'防风控限速已开启：每篇间隔约 {spec.delay_seconds:g} 秒')
     else:
         emit.log('警告：未开启限速，高频采集容易触发小红书风控')
+    if spec.no_watermark:
+        emit.log('无水印原图已开启：图片走 ci.xiaohongshu.com 原图直链（分辨率更高）')
 
     note_list = []
     skipped = 0
@@ -424,7 +427,7 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
             break
         api_i = apis_list[(index - 1) % len(apis_list)]
         try:
-            success, msg, note_info = _spider_note(api_i, url)
+            success, msg, note_info = _spider_note(api_i, url, spec.no_watermark)
         except Exception as exc:
             success, msg, note_info = False, exc, None
         if success and note_info:
@@ -501,6 +504,7 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
             from desktop.xhs_export import export_xiaolvsu_zip
             zip_path = export_xiaolvsu_zip(
                 zip_notes, base_dir, spec.task_name, never_stop, emit,
+                no_watermark=spec.no_watermark,
             ) or ''
         else:
             emit.log('勾选的笔记均为视频，无图文可打包')
@@ -509,7 +513,8 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
         emit.progress(0, len(note_list), '保存媒体')
         for index, note_info in enumerate(note_list, start=1):
             try:
-                download_note(note_info, media_dir, spec.save_choice)
+                download_note(note_info, media_dir, spec.save_choice,
+                              no_watermark=spec.no_watermark)
             except Exception as exc:
                 emit.log(f'媒体保存失败（{index}/{len(note_list)}）：{exc}')
             emit.progress(index, len(note_list), '保存媒体')

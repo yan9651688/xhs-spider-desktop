@@ -11,8 +11,8 @@ import threading
 import time
 
 from loguru import logger
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap, QPen
+from PySide6.QtCore import QDate, QDateTime, QMargins, Qt, QThread, QTime, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from desktop import paths
+from desktop.account_history import METRIC_LABELS, account_options, build_series, growth_summary
 from desktop.auth_client import AuthClient, AuthError
 from desktop.spider_service import (
     TaskSpec,
@@ -47,6 +48,19 @@ from desktop.spider_service import (
     run_user_search,
 )
 from desktop.xhs_login_dialog import XhsLoginDialog
+
+# QtCharts 用于账号矩阵的粉丝增长曲线；缺失时该卡片整体隐藏，不影响其它功能
+try:
+    from PySide6.QtCharts import (
+        QChart,
+        QChartView,
+        QDateTimeAxis,
+        QLineSeries,
+        QValueAxis,
+    )
+    HAS_QTCHARTS = True
+except Exception:  # pragma: no cover - 仅在裁剪过的 PySide6 上触发
+    HAS_QTCHARTS = False
 
 SORT_OPTIONS = [('综合排序', 0), ('最新', 1), ('最多点赞', 2), ('最多评论', 3), ('最多收藏', 4)]
 TYPE_OPTIONS = [('不限', 0), ('视频笔记', 1), ('图文笔记', 2)]
@@ -598,13 +612,19 @@ class MainWindow(QMainWindow):
         self.zip_check.setToolTip('导出小绿书压缩包（图片+文案.txt），可直接上传 xiao 赛道管理')
         self.ai_check = QCheckBox('AI改写')
         self.ai_check.setToolTip('抓取后调用 AI 改写标题与文案（在设置页配置接口）')
+        self.no_water_check = QCheckBox('无水印原图')
+        self.no_water_check.setToolTip(
+            '图片改走 ci.xiaohongshu.com 原图直链：实测分辨率更高（如 1080×1440 → 3072×4096）。\n'
+            '默认关闭：属于未公开接口，可能个别图片取不到，失败时会记日志。'
+        )
         for w in (self.img_check, self.video_check, self.excel_check,
-                  self.zip_check, self.ai_check):
+                  self.zip_check, self.ai_check, self.no_water_check):
             checks_row.addWidget(w)
         checks_row.addStretch(1)
         # 评论采集没有媒体/无打包意义，也不走图文 AI 改写：切页签时隐藏这些选项
         self.media_option_widgets = [self.img_check, self.video_check,
-                                     self.zip_check, self.ai_check]
+                                     self.zip_check, self.ai_check,
+                                     self.no_water_check]
         self.content_label = content_label
         grid.addWidget(content_label, 2, 0)
         grid.addLayout(checks_row, 2, 1, 1, 3)
@@ -836,6 +856,154 @@ class MainWindow(QMainWindow):
 
     # ---------- 账号矩阵：资产台账 + 健康巡检 ----------
 
+    def _build_chart_card(self) -> QWidget:
+        """粉丝增长曲线卡片：账号 + 指标两个下拉 + 折线图。
+
+        曲线数据全部来自台账 history（每次成功巡检按天写一条快照），
+        没有历史时显示占位文案而不是画一条假曲线。
+        """
+        card = QFrame()
+        card.setObjectName('card')
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        title = QLabel('账号增长曲线')
+        title.setObjectName('chartTitle')
+        head.addWidget(title)
+        self.chart_summary = QLabel('')
+        self.chart_summary.setObjectName('mutedLabel')
+        head.addWidget(self.chart_summary)
+        head.addStretch(1)
+
+        self.chart_account_combo = QComboBox()
+        self.chart_account_combo.setObjectName('chartSelect')
+        self.chart_account_combo.currentIndexChanged.connect(
+            lambda _=0: self.refresh_chart())
+        head.addWidget(self.chart_account_combo)
+
+        self.chart_metric_combo = QComboBox()
+        self.chart_metric_combo.setObjectName('chartSelect')
+        for key, text in METRIC_LABELS.items():
+            self.chart_metric_combo.addItem(text, key)
+        self.chart_metric_combo.currentIndexChanged.connect(
+            lambda _=0: self.refresh_chart())
+        head.addWidget(self.chart_metric_combo)
+        layout.addLayout(head)
+
+        self.chart_view = None
+        self.chart_placeholder = QLabel('暂无历史数据，巡检一次后开始累积（每次巡检按天记一条快照）。')
+        self.chart_placeholder.setObjectName('mutedLabel')
+        self.chart_placeholder.setAlignment(Qt.AlignCenter)
+        self.chart_placeholder.setMinimumHeight(180)
+        if HAS_QTCHARTS:
+            self.chart_view = QChartView(self._new_chart())
+            self.chart_view.setObjectName('chartView')
+            self.chart_view.setRenderHint(QPainter.Antialiasing)
+            self.chart_view.setFixedHeight(210)
+            self.chart_view.setStyleSheet('background: transparent; border: none;')
+            self.chart_view.setVisible(False)
+            layout.addWidget(self.chart_view)
+        layout.addWidget(self.chart_placeholder)
+        return card
+
+    @staticmethod
+    def _new_chart():
+        chart = QChart()
+        chart.legend().setVisible(False)
+        chart.setBackgroundVisible(False)
+        chart.setMargins(QMargins(0, 0, 0, 0))
+        return chart
+
+    def refresh_chart(self, ledger: dict = None):
+        """按当前下拉选择重绘曲线。数据为空时回退占位文案。"""
+        if not hasattr(self, 'chart_account_combo'):
+            return
+        if ledger is None:
+            ledger = paths.load_accounts()
+
+        options = account_options(ledger)
+        previous = self.chart_account_combo.currentData() or '__all__'
+        self.chart_account_combo.blockSignals(True)
+        self.chart_account_combo.clear()
+        for user_id, label in options:
+            self.chart_account_combo.addItem(label, user_id)
+        index = self.chart_account_combo.findData(previous)
+        self.chart_account_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.chart_account_combo.blockSignals(False)
+
+        user_id = self.chart_account_combo.currentData() or '__all__'
+        metric = self.chart_metric_combo.currentData() or 'fans'
+        series = build_series(ledger, user_id, metric)
+
+        if not HAS_QTCHARTS or self.chart_view is None:
+            self.chart_placeholder.setText(
+                '当前环境未安装图表组件（PySide6.QtCharts），曲线暂不可用。')
+            return
+
+        if len(series) < 2:
+            # 只有一天快照画不出趋势：如实说明，不强行连点
+            self.chart_view.setVisible(False)
+            self.chart_placeholder.setVisible(True)
+            if series:
+                self.chart_placeholder.setText(
+                    f'已记录 1 天数据（{series[0][0]}：{series[0][1]:,}），'
+                    '再来一次巡检就能看到增长趋势。')
+            else:
+                self.chart_placeholder.setText(
+                    '暂无历史数据，巡检一次后开始累积（每次巡检按天记一条快照）。')
+            self.chart_summary.setText('')
+            return
+
+        summary = growth_summary(series)
+        label = METRIC_LABELS.get(metric, '')
+        delta = summary['delta']
+        arrow = '↑' if delta > 0 else ('↓' if delta < 0 else '→')
+        self.chart_summary.setText(
+            f"{summary['days']} 天 · {label} {summary['first']:,} {arrow} {summary['last']:,}"
+            f"（{'+' if delta > 0 else ''}{delta:,}）")
+
+        self._draw_chart(series, label)
+        self.chart_placeholder.setVisible(False)
+        self.chart_view.setVisible(True)
+
+    def _draw_chart(self, series: list, label: str):
+        chart = self.chart_view.chart()
+        chart.removeAllSeries()
+        for axis in list(chart.axes()):
+            chart.removeAxis(axis)
+
+        line = QLineSeries()
+        line.setColor(QColor('#6c5ce7'))
+        pen = QPen(QColor('#6c5ce7'))
+        pen.setWidth(2)
+        line.setPen(pen)
+        for date, value in series:
+            ms = QDateTime(QDate.fromString(date, 'yyyy-MM-dd'),
+                           QTime(0, 0)).toMSecsSinceEpoch()
+            line.append(float(ms), float(value))
+        chart.addSeries(line)
+
+        axis_x = QDateTimeAxis()
+        axis_x.setFormat('MM-dd')
+        axis_x.setTickCount(min(len(series), 7))
+        axis_x.setLabelsColor(QColor('#9aa0a6'))
+        chart.addAxis(axis_x, Qt.AlignBottom)
+        line.attachAxis(axis_x)
+
+        axis_y = QValueAxis()
+        values = [value for _date, value in series]
+        low, high = min(values), max(values)
+        pad = max(1.0, (high - low) * 0.15)
+        axis_y.setRange(max(0.0, low - pad), high + pad)
+        axis_y.setLabelFormat('%d')
+        axis_y.setLabelsColor(QColor('#9aa0a6'))
+        chart.addAxis(axis_y, Qt.AlignLeft)
+        line.attachAxis(axis_y)
+        chart.setTitle('')
+
     def _build_matrix_page(self) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -879,6 +1047,9 @@ class MainWindow(QMainWindow):
         self.stat_broken = self._stat_card(cards, 'statCard6', '异常账号', '0 个')
         self.stat_fans = self._stat_card(cards, 'statCard7', '总粉丝数', '—')
         outer.addLayout(cards)
+
+        # 粉丝增长曲线（数据来自台账 history，每 90 天按天快照）
+        outer.addWidget(self._build_chart_card())
 
         # 台账表
         table_card = QFrame()
@@ -959,6 +1130,7 @@ class MainWindow(QMainWindow):
             table.setCellWidget(row, 2, self._health_label(record.get('health')))
 
         self._update_matrix_stats(records)
+        self.refresh_chart(ledger)
         self.render_xhs_accounts()
 
     def _account_cell(self, record: dict) -> QWidget:
@@ -1403,7 +1575,7 @@ class MainWindow(QMainWindow):
         else:
             self.xhs_label.setText('小红书：未登录')
             self.xhs_label.setObjectName('xhsStateBad')
-            self.xhs_login_btn.setText('扫码登录小红书')
+            self.xhs_login_btn.setText('登录小红书')
         self._restyle(self.xhs_label)
         self.xhs_label.setStyleSheet('')
 
@@ -1422,7 +1594,7 @@ class MainWindow(QMainWindow):
     def open_xhs_login(self):
         dialog = XhsLoginDialog(self)
         if dialog.exec():
-            self.append_log('扫码登录成功，正在恢复会话…')
+            self.append_log('小红书登录成功，正在恢复会话…')
             self.auth = None
             self.restore_xhs_session()
 
@@ -1452,6 +1624,7 @@ class MainWindow(QMainWindow):
             save_videos=self.video_check.isChecked(),
             save_excel=self.excel_check.isChecked(),
             zip_export=self.zip_check.isChecked(),
+            no_watermark=self.no_water_check.isChecked(),
             ai_cfg=ai_cfg,
             delay_seconds=float(self.delay_spin.value()),
             task_name=self.task_edit.text().strip(),

@@ -295,6 +295,31 @@ QTableWidget#accountTable {
 QTableWidget#accountTable::item { padding: 6px 6px; }
 QTableWidget#accountTable::item:selected { background-color: #eeecfb; color: #2d3436; }
 
+/* ============ 账号矩阵：粉丝增长曲线 ============ */
+QWidget#chartPanel { background: transparent; }
+QLabel#chartTitle { font-size: 13px; font-weight: 700; color: #2d3436; }
+QFrame#chartCard {
+    background-color: #ffffff;
+    border: none;
+    border-radius: 0px;
+}
+QComboBox#chartSelect {
+    border: 1px solid #e6e8ef;
+    border-radius: 8px;
+    padding: 4px 10px;
+    background: #ffffff;
+    color: #2d3436;
+    min-width: 132px;
+}
+QComboBox#chartSelect::drop-down { border: none; width: 18px; }
+QComboBox#chartSelect QAbstractItemView {
+    border: 1px solid #e6e8ef;
+    background: #ffffff;
+    selection-background-color: #eeecfb;
+    selection-color: #2d3436;
+    outline: none;
+}
+
 /* ============ 页签 ============ */
 QTabWidget#collectTabs::pane {
     border: none;

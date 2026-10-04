@@ -116,7 +116,78 @@ def handle_user_info(data, user_id):
         'tags': tags,
     }
 
-def handle_note_info(data):
+def _pick_image_url(image):
+    """从一张 image 对象选图片直链。
+
+    优先取 info_list 里 image_scene == 'WB_DFT' 的那条（浏览页实际渲染的大图），
+    回退到下标 1、再回退到第一条 —— 旧代码硬编码 [1]，字段顺序一变就 KeyError。
+
+    返回的一定是能下载的默认直链；原图（ci.xiaohongshu.com）改写放在
+    `_original_image_url` 里，因为部分资产该路径不提供服务，需要在下载时兜底。
+    """
+    info_list = image.get('info_list') or []
+    url = ''
+    for entry in info_list:
+        if isinstance(entry, dict) and entry.get('image_scene') == 'WB_DFT' and entry.get('url'):
+            url = entry['url']
+            break
+    if not url:
+        for index in (1, 0):
+            if len(info_list) > index and isinstance(info_list[index], dict):
+                url = info_list[index].get('url') or ''
+                if url:
+                    break
+    return url
+
+
+def _original_image_url(url):
+    """把图床直链改写为 ci.xiaohongshu.com 原图直链；失败时返回空串（由调用方兜底）。"""
+    if not url:
+        return ''
+    try:
+        from apis.xhs_pc_apis import XHS_Apis
+        success, _msg, new_url = XHS_Apis.get_note_no_water_img(url)
+        if success and new_url and new_url != url:
+            return new_url
+    except Exception as exc:
+        logger.debug(f'无水印原图改写失败，回退默认直链：{exc}')
+    return ''
+
+
+# 视频流键优先级：2026-10 实测 stream 只有 EF4/EF5/EF6/EF7，
+# EF5 为最高档（1080×1920 或 720×1280），EF4 次之。
+_VIDEO_STREAM_KEYS = ('EF5', 'EF4', 'EF6', 'EF7')
+
+
+def _pick_video_addr(video_info):
+    """从 note_card.video 里选一条可下载的直链。
+
+    旧实现取 media.stream['h264'] 与 video['consumer']，两者在新版接口里都已不存在
+    （stream 键为 EF4-EF7，consumer 为 None），导致视频笔记拿不到地址、下载不到东西。
+    这里按 _VIDEO_STREAM_KEYS 优先级取同键内像素数最大的一条；全空则返回 None。
+    """
+    stream_map = (video_info.get('media') or {}).get('stream') or {}
+    if not isinstance(stream_map, dict):
+        return None
+    ordered = [_VIDEO_STREAM_KEYS] + [
+        tuple(k for k in stream_map if k not in _VIDEO_STREAM_KEYS)
+    ]
+    for keys in ordered:
+        for key in keys:
+            candidates = [
+                s for s in (stream_map.get(key) or [])
+                if isinstance(s, dict) and (s.get('master_url') or s.get('url'))
+            ]
+            if candidates:
+                best = max(
+                    candidates,
+                    key=lambda s: int(s.get('width') or 0) * int(s.get('height') or 0),
+                )
+                return best.get('master_url') or best.get('url')
+    return None
+
+
+def handle_note_info(data, no_watermark=False):
     note_id = data['id']
     note_url = data['url']
     note_type = data['note_card']['type']
@@ -138,24 +209,19 @@ def handle_note_info(data):
     share_count = data['note_card']['interact_info']['share_count']
     image_list_temp = data['note_card']['image_list']
     image_list = []
+    image_list_original = []
     for image in image_list_temp:
         try:
-            image_list.append(image['info_list'][1]['url'])
-            # success, msg, img_url = XHS_Apis.get_note_no_water_img(image['info_list'][1]['url'])
-            # image_list.append(img_url)
+            url = _pick_image_url(image)
         except (KeyError, IndexError, TypeError):
-            pass
+            url = ''
+        if url:
+            image_list.append(url)
+            image_list_original.append(_original_image_url(url) if no_watermark else '')
     if note_type == '视频':
         video_cover = image_list[0] if image_list else None
-        video_addr = None
         video_info = data.get('note_card', {}).get('video', {})
-        streams = video_info.get('media', {}).get('stream', {}).get('h264', [])
-        if streams:
-            video_addr = streams[0].get('master_url') or streams[0].get('url')
-        if not video_addr and 'consumer' in video_info:
-            origin_key = video_info['consumer'].get('origin_video_key')
-            if origin_key:
-                video_addr = f"https://sns-video-bd.xhscdn.com/{origin_key}"
+        video_addr = _pick_video_addr(video_info)
     else:
         video_cover = None
         video_addr = None
@@ -188,6 +254,9 @@ def handle_note_info(data):
         'video_cover': video_cover,
         'video_addr': video_addr,
         'image_list': image_list,
+        # 与 image_list 同长度、同顺序：勾选「无水印原图」时给出原图直链，
+        # 未勾选或该资产无原图时为 ''，下载时回退 image_list[i]。
+        'image_list_original': image_list_original,
         'tags': tags,
         'upload_time': upload_time,
         'ip_location': ip_location,
@@ -214,11 +283,11 @@ def handle_comment_info(data):
         pictures_temp = data['pictures']
         for picture in pictures_temp:
             try:
-                pictures.append(picture['info_list'][1]['url'])
-                # success, msg, img_url = XHS_Apis.get_note_no_water_img(picture['info_list'][1]['url'])
-                # pictures.append(img_url)
+                url = _pick_image_url(picture)
             except (KeyError, IndexError, TypeError):
-                pass
+                url = ''
+            if url:
+                pictures.append(url)
     except (KeyError, TypeError):
         pass
     return {
@@ -322,7 +391,12 @@ def save_note_detail(note, path):
 
 
 @retry(tries=3, delay=1)
-def download_note(note_info, path, save_choice):
+def download_note(note_info, path, save_choice, no_watermark=False):
+    """下载一篇笔记的媒体文件。
+
+    no_watermark=True 时图片优先走 ci.xiaohongshu.com 原图直链（分辨率更高、JPEG
+    规范化），失败自动回退默认图床直链；视频地址与是否无水印无关。
+    """
     note_id = note_info['note_id']
     user_id = note_info['user_id']
     title = note_info['title']
@@ -339,6 +413,15 @@ def download_note(note_info, path, save_choice):
     save_note_detail(note_info, save_path)
     if note_type == '图集' and save_choice in ['media', 'media-image', 'all']:
         for img_index, img_url in enumerate(note_info['image_list']):
+            # 无水印开关打开时优先原图；原图路径对部分资产不提供服务，失败回退默认直链
+            original_url = _original_url_at(note_info, img_index) if no_watermark else ''
+            if original_url:
+                try:
+                    download_media(save_path, f'image_{img_index}', original_url, 'image')
+                    continue
+                except Exception as exc:
+                    logger.warning(
+                        f'原图直链下载失败，回退默认直链（{note_id} 第 {img_index + 1} 张）：{exc}')
             download_media(save_path, f'image_{img_index}', img_url, 'image')
     elif note_type == '视频' and save_choice in ['media', 'media-video', 'all']:
         if note_info.get('video_cover'):
@@ -350,6 +433,14 @@ def download_note(note_info, path, save_choice):
         else:
             logger.warning(f"video url is empty: {note_id}")
     return save_path
+
+
+def _original_url_at(note_info: dict, index: int) -> str:
+    """取第 index 张图的原图直链；没有则返回空串。"""
+    original = note_info.get('image_list_original') or []
+    if 0 <= index < len(original):
+        return original[index] or ''
+    return ''
 
 
 def check_and_create_path(path):
