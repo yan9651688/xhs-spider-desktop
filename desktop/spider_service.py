@@ -369,7 +369,6 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
     emit 需要提供：log(str) / note(dict) / progress(done, total, stage)
     should_stop() 返回 True 时在安全点中断。
     """
-    from spider.spider import Data_Spider
     from xhs_utils.data_util import download_note, save_to_xlsx
     from xhs_utils.xhs_pc import XHSPcAuth
     from apis.xhs_pc_apis import XHS_Apis

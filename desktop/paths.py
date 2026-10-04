@@ -12,6 +12,7 @@ SESSION_FILE = APP_DIR / 'session.json'
 XHS_COOKIE_FILE = APP_DIR / 'xhs_cookie.txt'
 COOKIES_FILE = APP_DIR / 'xhs_cookies.json'
 ACCOUNTS_FILE = APP_DIR / 'xhs_accounts.json'
+WATCHLIST_FILE = APP_DIR / 'xhs_watchlist.json'
 AVATAR_DIR = APP_DIR / 'avatars'
 DEFAULT_OUTPUT_DIR = Path.home() / 'Documents' / 'XHS采集'
 

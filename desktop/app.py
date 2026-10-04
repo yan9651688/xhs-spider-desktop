@@ -255,7 +255,8 @@ QLabel#statLabel { font-size: 11px; color: rgba(255,255,255,0.78); }
 QLabel#statValue { font-size: 19px; font-weight: 700; }
 
 /* ============ 账号矩阵：统计卡 + 健康状态 ============ */
-QFrame#statCard4, QFrame#statCard5, QFrame#statCard6, QFrame#statCard7 {
+QFrame#statCard4, QFrame#statCard5, QFrame#statCard6, QFrame#statCard7,
+QFrame#statCard8, QFrame#statCard9, QFrame#statCard10 {
     border: none;
     border-radius: 14px;
 }
@@ -276,9 +277,42 @@ QFrame#statCard7 {
         stop:0 #6c5ce7, stop:0.6 #5a4bd0, stop:1 #4ec9d4);
 }
 QFrame#statCard4 QLabel, QFrame#statCard5 QLabel,
-QFrame#statCard6 QLabel, QFrame#statCard7 QLabel {
+QFrame#statCard6 QLabel, QFrame#statCard7 QLabel,
+QFrame#statCard8 QLabel, QFrame#statCard9 QLabel,
+QFrame#statCard10 QLabel {
     color: #ffffff;
     background: transparent;
+}
+
+/* ============ 对标监控：统计卡 ============ */
+QFrame#statCard8 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #7b6cf0, stop:0.6 #5f4fd8, stop:1 #8a7bf5);
+}
+QFrame#statCard9 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #f9a03f, stop:0.6 #ef7d4e, stop:1 #e05a4e);
+}
+QFrame#statCard10 {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #4ec9a0, stop:0.65 #2fbf8f, stop:1 #4ec9d4);
+}
+QTreeWidget#watchTree {
+    background-color: #ffffff;
+    border: 1px solid #edeff3;
+    border-radius: 14px;
+    outline: none;
+}
+QTreeWidget#watchTree::item { padding: 5px 4px; }
+QTreeWidget#watchTree::item:selected { background-color: #eeecfb; color: #2d3436; }
+QTreeWidget#watchTree::branch { background: transparent; }
+QLabel#watchNewBadge {
+    background-color: #fdeee3;
+    color: #e8772e;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 9px;
+    padding: 2px 8px;
 }
 QLabel#healthOk { color: #2fbf8f; font-size: 12px; font-weight: 600; }
 QLabel#healthExpired { color: #e05a4e; font-size: 12px; font-weight: 600; }

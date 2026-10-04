@@ -9,10 +9,11 @@
 
 - **软件账号门**：启动需登录 xiao 账号；账号带 `xhs_expire_time` 有效期，到期即无法登录/使用
   （每 10 分钟后台复检一次，管理员改库可实时踢下线）
-- **小红书扫码登录**：本地生成二维码，App 扫码确认；Cookie 持久化在 `~/.xhs_spider/xhs_cookie.txt`，
-  下次启动自动恢复，失效自动要求重扫
-- **三种采集模式**：关键词搜索（数量/排序/类型/时间筛选）、笔记链接批量、用户主页全量
-- **保存**：图片 / 视频 / Excel（复用原项目 `download_note` / `save_to_xlsx`），输出到自选目录
+- **小红书登录**：扫码（二维码显示在窗口）或粘贴 Cookie 导入；Cookie 持久化在
+  `~/.xhs_spider/xhs_cookies.json`，下次启动自动恢复，失效自动要求重登
+- **六种采集模式**：关键词搜索、笔记链接批量、用户主页全量、评论、收藏/赞过、用户搜索
+- **保存**：图片 / 视频 / Excel / 小绿书 zip（复用原项目 `download_note` / `save_to_xlsx`）
+- **账号矩阵**：账号资产台账 + 健康巡检 + 增长曲线；**对标监控**：定时看竞品发没发新笔记
 - **界面**：PySide6；结果表格（双击打开笔记）、实时日志、进度条
 
 ## 开发运行
@@ -67,7 +68,8 @@ UPDATE sys_user SET xhs_expire_time=NOW() WHERE username='xxx';
 ## 本地文件
 
 `~/.xhs_spider/`：`config.json`（服务器/用户名/输出目录）、`session.json`（登录 token）、
-`xhs_cookie.txt`（小红书 Cookie，注意保密）。
+`xhs_cookies.json`（小红书 Cookie 池，注意保密）、`xhs_accounts.json`（账号台账 + 按天快照）、
+`xhs_watchlist.json`（对标监控清单 + 待采集新笔记）、`avatars/`（头像缓存）。
 
 ## 目录结构
 
@@ -75,9 +77,14 @@ UPDATE sys_user SET xhs_expire_time=NOW() WHERE username='xxx';
 desktop/
 ├── app.py               # 入口：Node 运行时探测 + 登录流程
 ├── login_dialog.py      # 软件账号登录（xiao /api/xhs/login）
-├── main_window.py       # 主窗口 + 采集工作线程 + 会话复检
-├── xhs_login_dialog.py  # 小红书扫码登录（二维码显示在窗口）
+├── main_window.py       # 主窗口 + 采集/巡检/对标检查工作线程 + 会话复检
+├── xhs_login_dialog.py  # 小红书登录（扫码 / Cookie 导入）
+├── watch_add_dialog.py  # 添加对标号（粘贴主页链接或 user_id）
 ├── spider_service.py    # 采集编排（URL收集→逐条抓取→保存）
+├── account_probe.py     # 自己的账号：健康巡检 + 资产解析（纯函数）
+├── account_history.py   # 台账快照 -> 增长曲线数据（纯函数）
+├── watchlist.py         # 对标清单读写 + 「哪些是新笔记」判定（纯函数）
+├── watch_probe.py       # 对标号探测：拉列表、建基线、找新笔记（纯函数）
 ├── auth_client.py       # xiao 接口客户端
 ├── paths.py             # ~/.xhs_spider 本地存储
 ├── selftest.py          # 自检（桩服务器 + 无头 UI）

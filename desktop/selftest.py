@@ -287,6 +287,283 @@ def test_account_ledger(tmp_dir=None):
             paths.ACCOUNTS_FILE, paths.AVATAR_DIR, paths.COOKIES_FILE = saved
 
 
+# ---------- 0b. 对标账号清单（纯数据层） ----------
+
+def test_watchlist(tmp_dir=None):
+    """对标清单读写：临时目录替换路径常量，绝不碰真实 ~/.xhs_spider。"""
+    import tempfile
+    from pathlib import Path
+
+    from desktop import paths, watchlist
+
+    saved = (paths.WATCHLIST_FILE, paths.AVATAR_DIR)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        paths.WATCHLIST_FILE = root / 'xhs_watchlist.json'
+        paths.AVATAR_DIR = root / 'avatars'
+        try:
+            check('清单文件不存在时返回空结构',
+                  watchlist.load_watchlist() == {'version': 1, 'targets': {}})
+
+            # --- parse_target：主页链接 / 裸 id / 空串 ---
+            check('解析主页链接（带 query）',
+                  watchlist.parse_target(
+                      'https://www.xiaohongshu.com/user/profile/665c7da900000000030308ce'
+                      '?xsec_token=AB&xsec_source=pc_search')
+                  == '665c7da900000000030308ce')
+            check('解析主页链接（尾斜杠）',
+                  watchlist.parse_target(
+                      'https://www.xiaohongshu.com/user/profile/665c7da900000000030308ce/')
+                  == '665c7da900000000030308ce')
+            check('解析裸 user_id', watchlist.parse_target('665c7da900000000030308ce')
+                  == '665c7da900000000030308ce')
+            check('解析空串返回空', watchlist.parse_target('') == ''
+                  and watchlist.parse_target('   ') == '')
+            check('解析非 user_id 文本返回空',
+                  watchlist.parse_target('一棠耳饰') == ''
+                  and watchlist.parse_target('https://www.xiaohongshu.com/explore/abc') == '')
+
+            # --- upsert：空值不覆盖 ---
+            watchlist.upsert_target('u1', nickname='一棠耳饰', fans='4.2万',
+                                    health=paths.HEALTH_OK)
+            record = watchlist.upsert_target('u1', nickname='')
+            check('对标号空字段不覆盖已有值',
+                  record['nickname'] == '一棠耳饰' and record['fans'] == '4.2万')
+            check('对标号主键是 user_id 而非 web_session',
+                  'u1' in watchlist.load_watchlist()['targets'])
+
+            # --- diff_new_notes：剔除置顶 + 按 seen 过滤 ---
+            notes = [
+                {'note_id': 'sticky', 'time': 1000,
+                 'interact_info': {'sticky': True}},      # 置顶：永远不算新
+                {'note_id': 'n1', 'time': 3000, 'interact_info': {}},
+                {'note_id': 'n2', 'time': 2000, 'interact_info': {}},
+                {'note_id': 'seen1', 'time': 1500, 'interact_info': {}},
+            ]
+            fresh = watchlist.diff_new_notes(notes, {'seen1'}, 0)
+            check('置顶笔记不被当成新笔记',
+                  'sticky' not in [n['note_id'] for n in fresh], str(fresh))
+            check('已见过的笔记不被当成新笔记',
+                  [n['note_id'] for n in fresh] == ['n1', 'n2'], str(fresh))
+            fresh = watchlist.diff_new_notes(notes, {'seen1'}, 2500)
+            check('早于基线的笔记被过滤',
+                  [n['note_id'] for n in fresh] == ['n1'], str(fresh))
+            check('空列表返回空', watchlist.diff_new_notes([], set(), 0) == [])
+
+            # --- add_note 幂等 ---
+            ok = watchlist.add_note('u1', {'note_id': 'n1', 'title': 'A', 'time': 3000})
+            check('登记新笔记成功', ok is True)
+            ok = watchlist.add_note('u1', {'note_id': 'n1', 'title': 'A', 'time': 3000})
+            check('重复登记同一笔记返回 False',
+                  ok is False and watchlist.pending_count(
+                      watchlist.target_of('u1')) == 1)
+
+            # --- mark_seen / 裁剪 ---
+            watchlist.mark_seen('u2', [f'x{i}' for i in range(350)])
+            record = watchlist.target_of('u2')
+            check('seen 裁到上限', len(record['seen']) == watchlist.SEEN_LIMIT,
+                  str(len(record['seen'])))
+            check('裁剪丢弃数被统计', record['seen_overflow'] == 50,
+                  str(record.get('seen_overflow')))
+            check('裁剪保留最新（列表头部）', record['seen'][0] == 'x0',
+                  record['seen'][0])
+
+            # --- drop_notes：采集后移除，但 seen 保留防重复登记 ---
+            watchlist.drop_notes('u1', ['n1'])
+            check('移除待处理笔记后 pending 归零',
+                  watchlist.pending_count(watchlist.target_of('u1')) == 0)
+            check('移除待处理笔记后 seen 仍保留（防重复登记）',
+                  watchlist.add_note('u1', {'note_id': 'n1', 'time': 3000}) is False)
+
+            # --- remove_targets ---
+            watchlist.remove_targets(['u1'])
+            check('移除对标号', 'u1' not in watchlist.load_watchlist()['targets'])
+            watchlist.remove_targets([])
+            check('移除空列表不报错', True)
+
+            # --- 结构损坏 ---
+            paths.WATCHLIST_FILE.write_text('{"targets": "garbage"}', encoding='utf-8')
+            check('清单结构损坏时不抛异常',
+                  watchlist.load_watchlist()['targets'] == {})
+        finally:
+            paths.WATCHLIST_FILE, paths.AVATAR_DIR = saved
+
+
+# ---------- 0c. 对标账号探测（桩 XHS_Apis，无网络） ----------
+
+class _StubWatchApi:
+    """桩：按预设返回 get_user_note_info / get_user_info，并记录调用次数。"""
+
+    def __init__(self, pages=None, user_info=None, fail=None):
+        self.pages = list(pages or [])
+        self.user_info = user_info
+        self.fail = fail                 # ('msg', 值) 或 ('exc', 异常)
+        self.calls = []
+
+    def get_user_note_info(self, user_id, cursor='', xsec_token='', xsec_source=''):
+        self.calls.append(('notes', cursor))
+        if self.fail and self.fail[0] == 'notes':
+            value = self.fail[1]
+            if isinstance(value, Exception):
+                raise value
+            return False, value, None
+        index = 0 if not cursor else 1
+        page = self.pages[index] if index < len(self.pages) else {'notes': [], 'has_more': False}
+        return True, '成功', {'data': page}
+
+    def get_user_info(self, user_id):
+        self.calls.append(('info', ''))
+        if self.fail and self.fail[0] == 'info':
+            value = self.fail[1]
+            if isinstance(value, Exception):
+                raise value
+            return False, value, None
+        return True, '成功', {'data': self.user_info or {}}
+
+
+def _note(note_id, time_ms, sticky=False, title='标题'):
+    return {'note_id': note_id, 'display_title': title, 'type': 'normal',
+            'time': time_ms, 'xsec_token': 'tok-' + note_id,
+            'interact_info': {'liked_count': '12', 'sticky': sticky}}
+
+
+def test_watch_probe():
+    from desktop import paths, watch_probe
+
+    check('列表条目解析缺字段不抛异常',
+          watch_probe.parse_note_list_item({}) == {}
+          and watch_probe.parse_note_list_item(
+              {'note_id': 'n1'})['liked'] == 0)
+    check('列表条目解析点赞数（字符串）',
+          watch_probe.parse_note_list_item(_note('n1', 1000))['liked'] == 12)
+    check('笔记 URL 带 xsec_token',
+          watch_probe.note_url({'note_id': 'n1', 'xsec_token': 'tk'})
+          == 'https://www.xiaohongshu.com/explore/n1?xsec_token=tk&xsec_source=pc_user')
+    check('笔记 URL 缺 token 时退化为裸链接',
+          watch_probe.note_url({'note_id': 'n1'})
+          == 'https://www.xiaohongshu.com/explore/n1')
+
+    # --- 首次：建立基线，不报新笔记 ---
+    api = _StubWatchApi(pages=[{
+        'notes': [_note(f'n{i}', 5000 - i, sticky=(i == 0)) for i in range(30)],
+        'has_more': True, 'cursor': 'c1',
+    }])
+    result = watch_probe.probe_target(api, 'u1', {})
+    check('首次检查判为正常', result['health'] == paths.HEALTH_OK, str(result)[:160])
+    check('首次检查不把历史当新笔记', result['new_notes'] == [])
+    check('首次检查建立基线（30 条进入 seen）', len(result['scanned_ids']) == 30)
+    check('首次检查不补翻第二页', len([c for c in api.calls if c[0] == 'notes']) == 1,
+          str(api.calls))
+    check('基线取首个非置顶笔记', result['baseline_note_id'] == 'n1',
+          result.get('baseline_note_id'))
+    check('首次检查备注说明已建基线', '基线' in result['health_note'])
+
+    # --- 非首次：只报基线之后的新笔记 ---
+    record = {'baseline_note_id': 'n9', 'baseline_time': 4991, 'seen': ['n1', 'n2', 'n9']}
+    api = _StubWatchApi(pages=[{
+        'notes': [_note('new2', 6000), _note('new1', 5500), _note('n9', 4991)],
+        'has_more': False, 'cursor': '',
+    }])
+    result = watch_probe.probe_target(api, 'u2', record)
+    check('非首次只报新笔记',
+          [n['note_id'] for n in result['new_notes']] == ['new2', 'new1'],
+          str(result['new_notes']))
+    check('非首次 pending 数与新笔记一致', result['pending'] == 2)
+
+    # --- 补页：一页装不下时带 cursor 再请求一次 ---
+    record = {'baseline_note_id': 'old', 'baseline_time': 100, 'seen': []}
+    api = _StubWatchApi(pages=[
+        {'notes': [_note(f'a{i}', 9000 - i) for i in range(30)],
+         'has_more': True, 'cursor': 'c1'},
+        {'notes': [_note('old', 100)], 'has_more': False, 'cursor': ''},
+    ])
+    result = watch_probe.probe_target(api, 'u3', record)
+    check('本页未触及基线时补翻第二页',
+          len([c for c in api.calls if c[0] == 'notes']) == 2, str(api.calls))
+    check('补页后命中基线即停止', result['health'] == paths.HEALTH_OK)
+
+    # --- 失败：绝不推进 seen / baseline ---
+    api = _StubWatchApi(fail=('notes', '461 风控'))
+    result = watch_probe.probe_target(api, 'u4', {})
+    check('列表返回风控判为限流', result['health'] == paths.HEALTH_LIMITED,
+          str(result)[:160])
+    check('失败时不回传 seen（防止把「没拿到」当「没有新笔记」）',
+          'scanned_ids' not in result or result['scanned_ids'] == [])
+    check('失败时不回传基线',
+          not result.get('baseline_note_id') and not result.get('baseline_time'))
+
+    api = _StubWatchApi(fail=('notes', TimeoutError('ReadTimeout')))
+    result = watch_probe.probe_target(api, 'u5', {})
+    check('列表异常判为网络异常', result['health'] == paths.HEALTH_NETWORK,
+          str(result)[:160])
+
+    # --- 列表成功、资料失败：health 仍为 OK ---
+    api = _StubWatchApi(
+        pages=[{'notes': [_note('n1', 1000)], 'has_more': False, 'cursor': ''}],
+        fail=('info', '接口超时'),
+    )
+    result = watch_probe.probe_target(api, 'u6', {})
+    check('资料失败不改变健康状态',
+          result['health'] == paths.HEALTH_OK, str(result)[:160])
+    check('资料失败留下备注', '资料获取失败' in result.get('health_note', ''),
+          result.get('health_note'))
+
+    # --- 资料成功：解析出昵称与粉丝 ---
+    api = _StubWatchApi(
+        pages=[{'notes': [], 'has_more': False, 'cursor': ''}],
+        user_info={
+            'basic_info': {'nickname': '一棠耳饰', 'imageb': 'http://a/x.jpg',
+                           'red_id': '123', 'ip_location': '上海'},
+            'interactions': [{'type': 'fans', 'count': '4.2万'}],
+            'posted': 399,
+        },
+    )
+    result = watch_probe.probe_target(api, 'u7', {})
+    check('资料解析出昵称', result.get('nickname') == '一棠耳饰', str(result)[:160])
+    check('资料解析出粉丝数（万）', result.get('fans') == 42000, str(result.get('fans')))
+    check('资料解析出作品数', result.get('posted') == 399)
+
+    # --- apply_result：写回清单 ---
+    import tempfile
+    from pathlib import Path
+    saved = (paths.WATCHLIST_FILE, paths.AVATAR_DIR)
+    with tempfile.TemporaryDirectory() as tmp:
+        paths.WATCHLIST_FILE = Path(tmp) / 'w.json'
+        paths.AVATAR_DIR = Path(tmp) / 'avatars'
+        try:
+            watch_probe.apply_result('u8', {
+                'health': paths.HEALTH_OK, 'health_note': '',
+                'last_checked_at': '2026-10-04 18:00:00',
+                'scanned_ids': ['n2', 'n1'],
+                'baseline_note_id': 'n2', 'baseline_time': 2000,
+                'new_notes': [{'note_id': 'n1', 'title': 'A', 'time': 1000}],
+                'pending': 1,
+            })
+            from desktop import watchlist as wl
+            record = wl.target_of('u8')
+            check('apply_result 登记新笔记', wl.pending_count(record) == 1)
+            check('apply_result 写入 seen', set(record['seen']) >= {'n1', 'n2'})
+            check('apply_result 写入基线', record['baseline_time'] == 2000)
+            check('apply_result 成功时失败计数归零',
+                  record.get('consecutive_failures') == 0)
+            # 上轮的备注不该一直挂着：本轮正常且无话可说时清掉
+            import desktop.watchlist as _wl
+            saved_clear = _wl.clear_health_note
+            cleared = []
+            _wl.clear_health_note = lambda uid: cleared.append(uid)
+            try:
+                watch_probe.apply_result('u8', {
+                    'health': paths.HEALTH_OK, 'health_note': '',
+                    'last_checked_at': '2026-10-04 19:00:00',
+                    'scanned_ids': ['n3'], 'new_notes': [], 'pending': 0,
+                })
+            finally:
+                _wl.clear_health_note = saved_clear
+            check('本轮正常时清掉上一轮的备注', cleared == ['u8'], str(cleared))
+        finally:
+            paths.WATCHLIST_FILE, paths.AVATAR_DIR = saved
+
+
 
 # ---------- 1. 桩服务器 + AuthClient ----------
 
@@ -396,8 +673,9 @@ def test_gui():
 
     from desktop import paths as dpaths
     from desktop import main_window as mw
+    from desktop import watchlist as dwatch
     from desktop.login_dialog import LoginDialog
-    from desktop.main_window import NAV_MATRIX, MainWindow
+    from desktop.main_window import NAV_MATRIX, NAV_WATCH, MainWindow
 
     dpaths.load_xhs_cookies = lambda: [{'cookie': 'web_session=selftest', 'nickname': '测试号'}]
     # 台账相关一律走内存：自检绝不能写真实的 ~/.xhs_spider
@@ -415,6 +693,59 @@ def test_gui():
     dpaths.upsert_account = lambda key, **fields: fake_ledger['accounts'].setdefault(key, fields)
     dpaths.remove_accounts = lambda keys: None
     dpaths.clear_avatars = lambda: None
+    # 配置落盘也必须走内存：save_config 会真写 ~/.xhs_spider/config.json
+    saved_configs = []
+    dpaths.save_config = lambda cfg: saved_configs.append({
+        'output_dir': cfg.get('output_dir'), 'probe_auto': cfg.get('probe_auto')})
+
+    # 对标清单同样走内存：不能写真实 ~/.xhs_spider/xhs_watchlist.json
+    fake_watch = {'version': 1, 'targets': {}}
+
+    def _load_watch():
+        return {'version': 1,
+                'targets': {k: dict(v) for k, v in fake_watch['targets'].items()}}
+
+    def _save_watch(data):
+        fake_watch['targets'] = {k: dict(v) for k, v in (data or {}).get('targets', {}).items()}
+
+    def _upsert_target(user_id, **fields):
+        record = fake_watch['targets'].setdefault(str(user_id), {'user_id': str(user_id)})
+        for name, value in fields.items():
+            if value is None or value == '':
+                continue
+            record[name] = value
+        return record
+
+    def _add_note(user_id, note):
+        record = fake_watch['targets'].setdefault(str(user_id), {'user_id': str(user_id)})
+        seen = [str(n) for n in (record.get('seen') or [])]
+        note_id = str((note or {}).get('note_id') or '')
+        if not note_id or note_id in seen:
+            return False
+        record.setdefault('notes', []).insert(0, dict(note))
+        record.setdefault('seen', []).insert(0, note_id)
+        return True
+
+    def _drop_notes(user_id, note_ids):
+        record = fake_watch['targets'].get(str(user_id))
+        if not record:
+            return
+        drop = {str(n) for n in (note_ids or [])}
+        record['notes'] = [n for n in (record.get('notes') or [])
+                           if str(n.get('note_id') or '') not in drop]
+
+    dwatch.load_watchlist = _load_watch
+    dwatch.save_watchlist = _save_watch
+    dwatch.upsert_target = _upsert_target
+    dwatch.remove_targets = lambda user_ids: [fake_watch['targets'].pop(str(u), None)
+                                              for u in (user_ids or [])]
+    dwatch.add_note = _add_note
+    dwatch.drop_notes = _drop_notes
+    dwatch.mark_seen = lambda user_id, note_ids: fake_watch['targets'].setdefault(
+        str(user_id), {'user_id': str(user_id)})
+    dwatch.prune_target = lambda user_id: fake_watch['targets'].get(str(user_id), {})
+    dwatch.clear_health_note = lambda user_id: fake_watch['targets'].get(
+        str(user_id), {}).__setitem__('health_note', '')
 
     app = QApplication.instance() or QApplication([])
     login = LoginDialog({'server': 'http://demo', 'username': 'alice'})
@@ -426,6 +757,23 @@ def test_gui():
         {'token': 't', 'username': 'alice', 'name': 'Alice', 'xhsExpireTime': '永久'},
     )
     check('主窗口构建（6 个采集页签）', window.tabs.count() == 6)
+
+    # 输出目录两处输入框必须双向同步（曾经设置页那个从没被读过）
+    window.output_edit.setText('/tmp/selftest-out-a')
+    check('改采集页目录同步到设置页',
+          window.settings_output_edit.text() == '/tmp/selftest-out-a')
+    window.settings_output_edit.setText('/tmp/selftest-out-b')
+    check('改设置页目录同步回采集页',
+          window.output_edit.text() == '/tmp/selftest-out-b')
+    check('设置页改目录能进采集 spec',
+          window._current_spec().output_dir == '/tmp/selftest-out-b')
+    saved_configs.clear()
+    window._persist_output_dir()
+    check('编辑结束落盘输出目录',
+          any(c.get('output_dir') == '/tmp/selftest-out-b' for c in saved_configs))
+    window.output_edit.setText(os.getcwd())
+    window._persist_output_dir()
+
     spec = window._current_spec()
     check('默认任务模式为 search', spec.mode == 'search' and spec.query == '')
     window.tabs.setCurrentIndex(1)
@@ -577,6 +925,129 @@ def test_gui():
     window.probe_auto_check.setChecked(True)
     window.switch_page(NAV_MATRIX)
     check('切到矩阵页不改动采集页签', window.pages.currentIndex() == NAV_MATRIX)
+
+    # 对标监控页：导航装配、空态、清单渲染、勾选与采集
+    check('导航共 4 项', len(window.nav_buttons) == 4, str(sorted(window.nav_buttons)))
+    check('对标监控导航存在',
+          window.nav_buttons[NAV_WATCH].text() == '对标监控')
+    check('对标监控页已装配', hasattr(window, 'watch_tree'))
+    check('对标树列数正确', window.watch_tree.columnCount() == 7,
+          str(window.watch_tree.columnCount()))
+    window.switch_page(NAV_WATCH)
+    check('切到对标页', window.pages.currentIndex() == NAV_WATCH)
+    check('空清单时统计卡为 0',
+          window.stat_watch_total.text() == '0 个', window.stat_watch_total.text())
+    check('空清单时给出添加指引', '添加对标号' in window.watch_hint.text(),
+          window.watch_hint.text())
+
+    fake_watch['targets'] = {
+        'w1': {'user_id': 'w1', 'nickname': '一棠耳饰', 'fans': 42000, 'posted': 399,
+               'ip_location': '上海', 'health': 'ok', 'last_checked_at': '2026-10-04 18:00:00',
+               'notes': [
+                   {'note_id': 'n1', 'title': '新笔记A', 'type': 'normal', 'time': 1759000000000,
+                    'liked': 128, 'xsec_token': 'tk1'},
+                   {'note_id': 'n2', 'title': '新笔记B', 'type': 'video', 'time': 1758900000000,
+                    'liked': 96, 'xsec_token': 'tk2'},
+               ]},
+        'w2': {'user_id': 'w2', 'nickname': '珠宝阁耳饰', 'health': 'limited',
+               'notes': [{'note_id': 'n3', 'title': 'C', 'type': 'normal',
+                          'time': 1758800000000, 'liked': 5, 'xsec_token': 'tk3'}]},
+    }
+    window.refresh_watch_page(sync=False)
+    check('对标树渲染 2 个顶级项', window.watch_tree.topLevelItemCount() == 2,
+          str(window.watch_tree.topLevelItemCount()))
+    check('子项合计 3 条新笔记',
+          sum(window.watch_tree.topLevelItem(i).childCount() for i in range(2)) == 3)
+    check('统计卡：待采集新笔记 3 篇', window.stat_watch_new.text() == '3 篇',
+          window.stat_watch_new.text())
+    check('统计卡：对标账号 2 个', window.stat_watch_total.text() == '2 个',
+          window.stat_watch_total.text())
+    check('芯片配色：限流号显示为限流风控',
+          any(window.watch_tree.topLevelItem(i).text(4) == '限流风控'
+              for i in range(2)))
+    check('新笔记默认全部勾选（开箱即可采）',
+          len(window.selected_watch_notes()) == 3,
+          str(len(window.selected_watch_notes())))
+
+    # 父项取消勾选 → 子项跟着取消；重新勾上 → 子项全选
+    top0 = window.watch_tree.topLevelItem(0)
+    top0.setCheckState(0, Qt.Unchecked)
+    app.processEvents()
+    check('父项取消勾选递归到子项',
+          all(top0.child(i).checkState(0) == Qt.Unchecked
+              for i in range(top0.childCount())))
+    top0.setCheckState(0, Qt.Checked)
+    app.processEvents()
+    check('父项勾选递归到子项',
+          all(top0.child(i).checkState(0) == Qt.Checked
+              for i in range(top0.childCount())))
+    check('全选后选中 3 条', len(window.selected_watch_notes()) == 3)
+
+    # 「采集选中的新笔记」构造的 spec
+    captured = {}
+
+    def _fake_start(spec, from_watch=False):
+        captured['spec'] = spec
+        return True
+
+    real_start = window.start_collection_with_spec
+    window.start_collection_with_spec = _fake_start
+    try:
+        window.collect_watch_notes()
+    finally:
+        window.start_collection_with_spec = real_start
+    spec = captured.get('spec')
+    check('对标采集走链接模式',
+          spec is not None and spec.mode == 'urls', str(spec))
+    check('对标采集 URL 数正确', spec is not None and len(spec.note_urls) == 3)
+    check('对标采集 URL 带 xsec_token',
+          spec is not None and 'xsec_token=tk1' in spec.note_urls[0], str(spec.note_urls[:1]))
+    check('对标采集默认任务名为「对标采集」',
+          spec is not None and spec.task_name == '对标采集', getattr(spec, 'task_name', ''))
+
+    # 采集完成后把本次选中的新笔记从待处理移除
+    window._watch_collect_notes = [{'user_id': 'w1', 'note_id': 'n1'},
+                                   {'user_id': 'w1', 'note_id': 'n2'}]
+    window._after_watch_collection()
+    check('对标采集完成后待处理笔记被清除',
+          len(fake_watch['targets']['w1'].get('notes') or []) == 0,
+          str(fake_watch['targets']['w1'].get('notes')))
+    check('清空待采集后统计卡归零', window.stat_watch_new.text() == '1 篇',
+          window.stat_watch_new.text())
+
+    # 三向互斥（QMessageBox 在 offscreen 下会阻塞，临时换成不弹窗的桩）
+    class _NoBox:
+        warnings = []
+
+        @classmethod
+        def warning(cls, parent, title, text, *a, **kw):
+            cls.warnings.append((title, text))
+
+        information = warning
+        critical = warning
+        question = warning
+
+    real_box = mw.QMessageBox
+    mw.QMessageBox = _NoBox
+    try:
+        window._probe_running = True
+        window.start_watch(silent=True)
+        check('巡检运行中拒绝启动对标检查', window._watch_running is False)
+        window._probe_running = False
+        window._watch_running = True
+        spec_ok = window._start_collection_with_spec(
+            __import__('desktop.spider_service', fromlist=['TaskSpec']).TaskSpec(
+                mode='urls', note_urls=['https://www.xiaohongshu.com/explore/abc'],
+                save_excel=True, output_dir=os.getcwd()))
+        check('对标检查运行中拒绝启动采集', spec_ok is False)
+        check('拒绝时给出提示而非静默失败',
+              any('对标检查' in w[1] for w in _NoBox.warnings), str(_NoBox.warnings))
+    finally:
+        mw.QMessageBox = real_box
+    window._watch_running = False
+
+    fake_watch['targets'] = {}
+    window.refresh_watch_page(sync=False)
     window.switch_page(0)
 
     # 粉丝增长曲线：数据来自台账 history，无历史时显示占位而不是假曲线
@@ -1209,6 +1680,8 @@ if __name__ == '__main__':
     test_auth_client()
     test_account_probe()
     test_account_ledger()
+    test_watchlist()
+    test_watch_probe()
     test_gui()
     test_task_spec()
     test_media_pickers()
