@@ -53,3 +53,4 @@ _live_session.json
 creator_cookie.json
 
 node_dist/
+.node_cache/

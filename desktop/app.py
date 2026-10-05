@@ -18,6 +18,12 @@ def ensure_node_runtime() -> bool:
         exe_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidates.append(os.path.join(exe_dir, 'node_dist', 'bin'))
         candidates.append(os.path.join(exe_dir, 'node_dist'))
+        # macOS .app：可执行文件在 Contents/MacOS/，--add-data 的落点实测在
+        # Contents/Frameworks（PyInstaller 也会在 Contents/Resources 放一份）。
+        # 不赌 sys._MEIPASS 具体指向哪个，把两种布局都列上。
+        contents = os.path.dirname(exe_dir)
+        for sub in ('Frameworks', 'Resources'):
+            candidates.append(os.path.join(contents, sub, 'node_dist', 'bin'))
         meipass = getattr(sys, '_MEIPASS', None)
         if meipass:
             candidates.append(os.path.join(meipass, 'node_dist', 'bin'))
@@ -33,11 +39,26 @@ def ensure_node_runtime() -> bool:
     ]
 
     path = os.environ.get('PATH', '')
-    for candidate in candidates:
+    # 逐个 prepend，所以必须倒着遍历：candidates[0]（打包进来的 node_dist）最后
+    # 被 prepend，才会落在 PATH 最前面。正着遍历会把优先级整个倒过来 ——
+    # 内置 node 反而排在 /opt/homebrew/bin、/usr/local/bin 之后，注释说的"优先"
+    # 就名存实亡，客户机上随便一个旧 node 都可能盖掉它。
+    for candidate in reversed(candidates):
         if candidate and os.path.isdir(candidate) and candidate not in path.split(os.pathsep):
             path = candidate + os.pathsep + path
     os.environ['PATH'] = path
-    return shutil.which('node') is not None
+
+    found = shutil.which('node')
+    # 打一行日志：客户机上排查"签名失败/扫码失败"时，第一个要确认的就是用的是哪个 node。
+    try:
+        from loguru import logger
+        if found:
+            logger.info(f'node 运行时: {found}')
+        else:
+            logger.warning('未找到 node 运行时，扫码登录与采集将不可用')
+    except Exception:
+        pass
+    return found is not None
 
 
 def _ensure_check_icon() -> str:

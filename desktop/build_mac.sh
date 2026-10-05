@@ -38,4 +38,6 @@ echo
 echo "打包完成："
 echo "  dist/XhsSpider.app"
 echo "  dist/XhsSpider.dmg   ← 发给客户的就是这个"
-[ "${BUNDLE_NODE:-0}" != "1" ] && echo "提示：未内置 Node，目标机器需安装 Node.js 20+（推荐 BUNDLE_NODE=1）"
+if [ "${BUNDLE_NODE:-0}" != "1" ]; then
+  echo "提示：未内置 Node，目标机器需安装 Node.js 20+（推荐 BUNDLE_NODE=1）"
+fi
