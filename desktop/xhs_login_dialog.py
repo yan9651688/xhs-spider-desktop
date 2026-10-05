@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import threading
 
 import qrcode
 from PySide6.QtCore import Qt, QThread, Signal
@@ -70,6 +71,15 @@ class QrLoginThread(QThread):
     succeeded = Signal(str)
     failed = Signal(str)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 协作式取消：qrcode_login 每轮轮询都会查，最长约 0.25s 生效。
+        self._stop = threading.Event()
+
+    def stop(self):
+        """请求中止扫码等待（对话框关闭时调用）。"""
+        self._stop.set()
+
     def run(self):
         try:
             from xhs_utils.xhs_pc import XHSPcAuth
@@ -77,21 +87,26 @@ class QrLoginThread(QThread):
             auth = XHSPcAuth.from_qrcode_login(
                 show_in_terminal=False,
                 qr_callback=self.qr_ready.emit,
+                should_stop=self._stop.is_set,
             )
-        except Exception as exc:  # 二维码过期/网络失败/初始化失败
-            # exc 已由 qrcode_login 填好具体原因（如"二维码已过期…"），直接展示
-            self.failed.emit(str(exc))
+        except Exception as exc:  # 二维码过期/网络失败/初始化失败/被取消
+            # exc 已由 qrcode_login 填好具体原因（如"二维码已过期…"），直接展示。
+            # 被取消时对话框已经关了，再发信号只会打到空处。
+            if not self._stop.is_set():
+                self.failed.emit(str(exc))
             return
         cookie = ''
         try:
             cookie = auth.cookies
-            if cookie:
+            if cookie and not self._stop.is_set():
                 paths.add_xhs_cookie(cookie)
         finally:
             try:
                 auth.close()
             except Exception:
                 pass
+        if self._stop.is_set():
+            return
         if cookie:
             self.succeeded.emit(cookie)
         else:
@@ -107,13 +122,24 @@ class CookieLoginThread(QThread):
     def __init__(self, cookie: str, parent=None):
         super().__init__(parent)
         self.cookie = cookie
+        self._stop = threading.Event()
+
+    def stop(self):
+        """请求中止；联网校验本身不可中断，用于抑制收尾时的信号与写入。"""
+        self._stop.set()
+
+    def _fail(self, message: str):
+        if not self._stop.is_set():
+            self.failed.emit(message)
 
     def run(self):
+        if self._stop.is_set():
+            return
         try:
             from apis.xhs_pc_apis import XHS_Apis
             from xhs_utils.xhs_pc import XHSPcAuth
         except Exception as exc:
-            self.failed.emit(f'加载登录模块失败：{exc}')
+            self._fail(f'加载登录模块失败：{exc}')
             return
         nickname = ''
         try:
@@ -125,7 +151,7 @@ class CookieLoginThread(QThread):
                     nickname = data.get('nickname') or ''
                     # guest=True 表示 web_session 已失效，接口却仍可能返回 200
                     if data.get('guest') is True:
-                        self.failed.emit('该 Cookie 已失效（未登录状态），请重新登录小红书后重新复制')
+                        self._fail('该 Cookie 已失效（未登录状态），请重新登录小红书后重新复制')
                         return
             except Exception:
                 pass
@@ -135,10 +161,12 @@ class CookieLoginThread(QThread):
                 except Exception:
                     pass
         except ValueError as exc:
-            self.failed.emit(f'Cookie 无效：{exc}')
+            self._fail(f'Cookie 无效：{exc}')
             return
         except Exception as exc:
-            self.failed.emit(f'Cookie 校验失败：{str(exc)[:120]}')
+            self._fail(f'Cookie 校验失败：{str(exc)[:120]}')
+            return
+        if self._stop.is_set():
             return
         paths.add_xhs_cookie(self.cookie, nickname)
         self.succeeded.emit(self.cookie, nickname)
@@ -152,6 +180,7 @@ class XhsLoginDialog(QDialog):
         self.setMinimumWidth(400)
         self.thread = None
         self.cookie_thread = None
+        self._shutting_down = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 14)
@@ -246,7 +275,9 @@ class XhsLoginDialog(QDialog):
             return
         self.status.setText('正在初始化设备并获取二维码…')
         self.start_btn.setEnabled(False)
-        self.thread = QrLoginThread(self)
+        # 故意不挂到对话框下：QThread 在 run() 未返回时被 Qt 连带析构会直接
+        # qFatal 掉整个进程，生命周期交给 _ACTIVE_THREADS 和 _shutdown_threads。
+        self.thread = QrLoginThread()
         _ACTIVE_THREADS.add(self.thread)
         self.thread.finished.connect(lambda t=self.thread: _ACTIVE_THREADS.discard(t))
         self.thread.qr_ready.connect(self.show_qr)
@@ -294,7 +325,7 @@ class XhsLoginDialog(QDialog):
         self.cookie_status.setText('正在验证 Cookie 并获取账号信息…')
         self.cookie_status.setStyleSheet('color:#6b7180;')
         self.cookie_btn.setEnabled(False)
-        self.cookie_thread = CookieLoginThread(cookie, self)
+        self.cookie_thread = CookieLoginThread(cookie)
         _ACTIVE_THREADS.add(self.cookie_thread)
         self.cookie_thread.finished.connect(
             lambda t=self.cookie_thread: _ACTIVE_THREADS.discard(t))
@@ -320,6 +351,39 @@ class XhsLoginDialog(QDialog):
         self.status.setStyleSheet('color:#c62828;')
         self.start_btn.setEnabled(True)
 
+    def _shutdown_threads(self):
+        """先停掉仍在跑的登录线程，再让对话框析构。
+
+        QThread 在 run() 还没返回时被销毁，Qt 会直接 qFatal
+        （"QThread: Destroyed while thread is still running"）终止整个进程。
+        扫码等待最长 3 分钟，用户点「取消」时线程必然还在轮询里，
+        所以关闭前必须先把线程收回来。
+        光靠 _ACTIVE_THREADS 不够：它只保 Python 引用，
+        挡不住 Qt 父对象析构时的 C++ 级联删除。
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        workers = [w for w in (self.thread, self.cookie_thread) if w is not None]
+        for worker in workers:
+            try:
+                worker.stop()
+            except Exception:
+                pass
+        for worker in workers:
+            if not worker.isRunning():
+                continue
+            # 轮询的取消检查最迟 ~0.25s 生效，1.5s 足够收掉绝大多数情况。
+            # 卡在单次网络请求里时等不到也没关系：线程不挂父对象，不会被级联析构，
+            # 这里只是尽量收干净，不值得为它把界面冻更久。
+            if not worker.wait(1500):
+                worker.setParent(None)
+
+    def done(self, result):
+        # 取消、关窗、登录成功三条路径最终都会汇到这里
+        self._shutdown_threads()
+        super().done(result)
+
     def closeEvent(self, event):
-        # 线程已注册到 _ACTIVE_THREADS，允许其在后台自然结束
+        self._shutdown_threads()
         super().closeEvent(event)

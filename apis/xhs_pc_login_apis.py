@@ -831,13 +831,43 @@ class XHSLoginApi:
         timeout_seconds=180,
         poll_interval=2.0,
         qr_callback=None,
+        should_stop=None,
     ):
         """扫码登录。成功返回 Cookie 字符串，失败返回 None。
 
         失败时 ``self.last_error`` 会写入面向用户的具体原因（中文），
         调用方可据此给出可诊断的提示，而不是笼统的"没拿到 Cookie"。
+
+        ``should_stop`` 是可选的无参可调用对象（如 ``threading.Event.is_set``），
+        返回真值时中止等待：GUI 关掉对话框时靠它把最长 3 分钟的轮询收回来，
+        否则调用方只能在轮询中途强行销毁线程。
         """
         self.last_error = ''
+
+        def _cancelled() -> bool:
+            return should_stop is not None and bool(should_stop())
+
+        def _pause(seconds: float) -> bool:
+            """可被打断的等待；返回 True 表示已请求中止。"""
+            remaining = max(0.5, float(seconds))
+            while remaining > 0:
+                if _cancelled():
+                    return True
+                step = min(0.25, remaining)
+                time.sleep(step)
+                remaining -= step
+            return _cancelled()
+
+        def _give_up() -> None:
+            logger.info('扫码流程已被调用方取消')
+            self.last_error = '已取消登录'
+
+        # 初始化 + 拿二维码 + 指纹校验要 10 秒上下，每步之间都要能中止，
+        # 否则调用方关窗口时只能干等这一串网络请求跑完。
+        if _cancelled():
+            _give_up()
+            return None
+
         logger.info('[1/5] 正在初始化匿名设备...')
         try:
             cookies = self.generate_init_cookies()
@@ -847,6 +877,9 @@ class XHSLoginApi:
             return None
         logger.debug(f'初始 Cookie 字段: {list(cookies)}')
 
+        if _cancelled():
+            _give_up()
+            return None
         logger.info('[2/5] 正在获取二维码...')
         success, msg, qr_data = self.generate_qrcode(cookies)
         if not success:
@@ -855,6 +888,9 @@ class XHSLoginApi:
             return None
         cookies = qr_data['cookies']
 
+        if _cancelled():
+            _give_up()
+            return None
         logger.info('[3/5] 正在验证本地指纹环境...')
         try:
             # Browser order: create QR -> first anonymous poll -> webprofile.
@@ -883,10 +919,17 @@ class XHSLoginApi:
         else:
             self.show_qrcode_image(qr_data['qr_url'])
 
+        if _cancelled():
+            _give_up()
+            return None
+
         logger.info('[4/5] 等待扫码和手机确认...')
         deadline = time.monotonic() + max(1.0, float(timeout_seconds))
         poll_errors = 0
         while time.monotonic() < deadline:
+            if _cancelled():
+                _give_up()
+                return None
             try:
                 success, msg, cookies = self.check_qrcode_status(
                     qr_data['qr_id'], qr_data['code'], cookies
@@ -899,7 +942,9 @@ class XHSLoginApi:
                     logger.error(f'二维码状态检查连续失败: {exc}')
                     self.last_error = f'网络连接不稳定，请检查网络后重试（{exc}）'
                     return None
-                time.sleep(max(0.5, float(poll_interval)))
+                if _pause(poll_interval):
+                    _give_up()
+                    return None
                 continue
             poll_errors = 0
             if success:
@@ -909,7 +954,9 @@ class XHSLoginApi:
                 logger.error(msg)
                 self.last_error = '二维码已过期，请点击「开始扫码 / 刷新二维码」重新生成'
                 return None
-            time.sleep(max(0.5, float(poll_interval)))
+            if _pause(poll_interval):
+                _give_up()
+                return None
         else:
             logger.error('等待扫码超时，请重新生成二维码')
             self.last_error = '等待扫码超时（3 分钟），请重新生成二维码后尽快扫码'

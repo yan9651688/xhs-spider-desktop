@@ -1233,6 +1233,152 @@ def test_xhs_login_dialog():
           is_valid_cookie('a1=x=y; web_session=a=b'))
 
 
+def test_xhs_login_thread_shutdown():
+    """关掉小红书登录框前必须把扫码线程收回来。
+
+    回归：线程原先挂在对话框下，main_window 里 `dialog.exec()` 返回后局部变量出
+    作用域，Qt 析构对话框时连带析构还阻塞在 3 分钟轮询里的 QThread，触发
+    "QThread: Destroyed while thread is still running" -> SIGABRT 整个进程。
+    """
+    import time as _time
+
+    import xhs_utils.xhs_pc as xhs_pc
+    from PySide6.QtCore import QThread
+    from PySide6.QtWidgets import QApplication
+
+    from desktop import xhs_login_dialog as xld
+
+    # 桩掉真实登录：只在 should_stop 置位后返回，用来验证取消信号确实透传到了
+    # qrcode_login 那一层，而不是只停了个空线程。
+    seen = {}
+
+    class _FakeXHSPcAuth:
+        @classmethod
+        def from_qrcode_login(cls, *, show_in_terminal=True, qr_callback=None,
+                              should_stop=None, **_kw):
+            seen['should_stop'] = should_stop
+            seen['show_in_terminal'] = show_in_terminal
+            for _ in range(1000):          # 上限 5s，正常几百毫秒内就返回
+                if should_stop is not None and should_stop():
+                    raise RuntimeError('已取消登录')
+                _time.sleep(0.005)
+            raise RuntimeError('桩登录未被取消')
+
+    orig = xhs_pc.XHSPcAuth
+    xhs_pc.XHSPcAuth = _FakeXHSPcAuth
+    try:
+        QApplication.instance() or QApplication([])
+        thread = xld.QrLoginThread()
+        check('扫码线程不挂在对话框下（避免父子级联析构）', thread.parent() is None)
+
+        signals = []
+        thread.succeeded.connect(lambda c: signals.append(('ok', c)))
+        thread.failed.connect(lambda m: signals.append(('fail', m)))
+
+        thread.start()
+        for _ in range(400):               # 等它真的进到 run()
+            if seen.get('should_stop') is not None:
+                break
+            _time.sleep(0.005)
+        check('线程把 should_stop 透传给了 qrcode_login',
+              callable(seen.get('should_stop')))
+        check('GUI 扫码不再要求终端渲染二维码', seen.get('show_in_terminal') is False)
+
+        started = _time.time()
+        thread.stop()
+        check('stop() 后线程及时收线', thread.wait(3000),
+              f'耗时 {_time.time() - started:.2f}s')
+        check('被取消的线程不再发信号（不会打到已关闭的对话框）',
+              signals == [], str(signals))
+    finally:
+        xhs_pc.XHSPcAuth = orig
+
+    # 对话框层：注入一个不会自己退出的桩线程，关掉对话框必须把它收掉
+    class _StubThread(QThread):
+        def __init__(self):
+            super().__init__()
+            self._stop = threading.Event()
+
+        def stop(self):
+            self._stop.set()
+
+        def run(self):
+            while not self._stop.is_set():
+                _time.sleep(0.01)
+
+    dialog = xld.XhsLoginDialog()
+    stub = _StubThread()
+    dialog.thread = stub
+    stub.start()
+    dialog.reject()                        # -> done() -> _shutdown_threads()
+    check('关闭对话框后线程已停止', not stub.isRunning())
+    dialog.deleteLater()
+
+
+def test_qrcode_login_cancel():
+    """should_stop 置位后 qrcode_login 必须尽快收手，不能把 180 秒轮询跑完。
+
+    真实 qrcode_login 前 3 步（初始化设备/拿二维码/指纹校验）要 10 秒上下，
+    取消检查必须铺到每一步之间，否则关窗口时调用方只能干等。
+    """
+    import time as _time
+
+    from apis.xhs_pc_login_apis import XHSLoginApi
+
+    def _api():
+        api = XHSLoginApi.__new__(XHSLoginApi)   # 绕开 __init__，不建 http client
+        api.last_error = ''
+        return api
+
+    def _no_request(*_a, **_kw):
+        raise AssertionError('已请求取消却仍然发起了网络请求')
+
+    # 1) 一进来就是取消状态：一个请求都不该发
+    stop = threading.Event()
+    stop.set()
+    api = _api()
+    api.generate_init_cookies = _no_request
+    check('取消已置位时 qrcode_login 直接返回', api.qrcode_login(should_stop=stop.is_set) is None)
+    check('取消时 last_error 为「已取消登录」', api.last_error == '已取消登录',
+          api.last_error)
+
+    # 2) 初始化阶段被取消：第一步之后就不该再往下走
+    stop2 = threading.Event()
+    api2 = _api()
+    api2.generate_qrcode = _no_request
+
+    def _init_then_cancel():
+        stop2.set()
+        return {'a1': 'x'}
+
+    api2.generate_init_cookies = _init_then_cancel
+    check('初始化阶段被取消：不再去拿二维码',
+          api2.qrcode_login(should_stop=stop2.is_set) is None)
+
+    # 3) 轮询中被取消：必须打断 poll_interval 的睡眠，而不是睡满
+    stop3 = threading.Event()
+    api3 = _api()
+    polls = []
+    api3.generate_init_cookies = lambda: {'a1': 'x'}
+    api3.generate_qrcode = lambda cookies: (True, '', {
+        'qr_id': 'q', 'code': 'c', 'cookies': {}, 'qr_url': 'https://x/qr'})
+    api3.ensure_webprofile = lambda cookies: None
+
+    def _poll_once(*_a):
+        polls.append(1)
+        stop3.set()                  # 第一轮轮询后请求取消
+        return False, '请扫描二维码', {}
+
+    api3.check_qrcode_status = _poll_once
+    started = _time.time()
+    result = api3.qrcode_login(should_stop=stop3.is_set, poll_interval=30)
+    elapsed = _time.time() - started
+    check('轮询中被取消：立即返回', result is None)
+    check('轮询中被取消：只轮询了一次', len(polls) == 1, str(len(polls)))
+    check('轮询中被取消：不等满 poll_interval（睡眠可打断）', elapsed < 2.0,
+          f'耗时 {elapsed:.2f}s')
+
+
 def test_no_watermark_download():
     """无水印下载：原图直链优先、失败回退默认直链（不联网，桩掉 requests）。"""
     import tempfile
@@ -1687,6 +1833,8 @@ if __name__ == '__main__':
     test_media_pickers()
     test_account_history()
     test_xhs_login_dialog()
+    test_xhs_login_thread_shutdown()
+    test_qrcode_login_cancel()
     test_no_watermark_download()
     test_xiaolvsu_zip()
     test_ai_parse()

@@ -463,6 +463,7 @@ class XHSPcAuth(XHSAuth):
         proxies: Optional[dict] = None,
         http_client: Optional[PcHttpClient] = None,
         qr_callback=None,
+        should_stop=None,
     ) -> 'XHSPcAuth':
         """Login through the local QR API flow and return a ready Auth object.
 
@@ -470,6 +471,8 @@ class XHSPcAuth(XHSAuth):
         browser, browser Cookie export, or browser JavaScript execution is used.
         ``qr_callback(url)`` lets GUI callers receive the QR content instead of
         terminal/image rendering.
+        ``should_stop()`` lets GUI callers cancel the up-to-3-minute scan wait
+        (see :meth:`XHSLoginApi.qrcode_login`).
         """
         from apis.xhs_pc_login_apis import XHSLoginApi
 
@@ -481,6 +484,7 @@ class XHSPcAuth(XHSAuth):
         cookies = login.qrcode_login(
             show_in_terminal=show_in_terminal,
             qr_callback=qr_callback,
+            should_stop=should_stop,
         )
         if not cookies:
             http_client.close()
