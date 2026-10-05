@@ -26,6 +26,12 @@ _WEBSECTIGA_CLI = os.path.join(_CORE_JS_DIR, 'websectiga_cli.js')
 _PROFILE_JS = os.path.join(_JS_DIR, 'profile.js')
 _WEB_SSK_JS = os.path.join(_JS_DIR, 'web_ssk.js')
 
+# Windows 上打包为 GUI 程序（PyInstaller --windowed）后自身没有控制台，
+# 此时创建子进程若不指定 CREATE_NO_WINDOW，系统会为每个子进程新分配一个
+# 控制台窗口，表现为命令行窗口不停闪烁。非 Windows 平台取不到该常量、
+# 回退为 0（即 subprocess 默认值），因此可以无条件传入。
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 _TIER_GATE = {
     '0101': ('mns0101_', 205),
     '0201': ('mns0201_', 208),
@@ -52,6 +58,8 @@ def generate_b1(
             cwd=_JS_DIR,
             encoding='utf-8',
             errors='replace',
+            creationflags=_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f'b1 runtime failed to start: {exc}') from exc
@@ -115,6 +123,8 @@ def run_signer(
             cwd=_JS_DIR,
             encoding='utf-8',
             errors='replace',
+            creationflags=_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -156,6 +166,8 @@ def _run_web_ssk(payload: Mapping[str, Any], timeout: float = 10.0) -> dict:
             cwd=_JS_DIR,
             encoding='utf-8',
             errors='replace',
+            creationflags=_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f'webSsk helper failed to start: {exc}') from exc
@@ -231,6 +243,7 @@ def generate_websectiga(
             cwd=_JS_DIR,
             encoding='utf-8',
             errors='replace',
+            creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f'websectiga runtime failed to start: {exc}') from exc
@@ -300,6 +313,8 @@ def generate_profile_data(
             cwd=_JS_DIR,
             encoding='utf-8',
             errors='replace',
+            creationflags=_NO_WINDOW,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f'profileData runtime failed to start: {exc}') from exc

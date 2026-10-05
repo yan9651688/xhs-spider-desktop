@@ -2,6 +2,7 @@ import json
 import math
 import os
 import random
+import subprocess
 import time
 import uuid
 from urllib.parse import urlencode
@@ -247,6 +248,12 @@ def generate_xray_traceid():
 
 _RAP_CLI = os.path.join(os.path.dirname(__file__), 'js', 'rap_cli.js')
 
+# Windows 上打包为 GUI 程序（PyInstaller --windowed）后自身没有控制台，
+# 此时创建子进程若不指定 CREATE_NO_WINDOW，系统会为每个子进程新分配一个
+# 控制台窗口，表现为命令行窗口不停闪烁。非 Windows 平台取不到该常量、
+# 回退为 0（即 subprocess 默认值），因此可以无条件传入。
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 def generate_x_rap_param(api, data, app_id=None, fingerprint_hex: str = ''):
     """生成 x-rap-param；算法唯一实现位于 ``js/rap.js``。
 
@@ -258,7 +265,6 @@ def generate_x_rap_param(api, data, app_id=None, fingerprint_hex: str = ''):
       - 指纹 ~219B         = 采集模板（同 mns envConst/envFpTail 思路，一次采集永久用）
     2026-07-16 实发验证：homefeed 逐字节对齐浏览器（273/273 字节）。
     """
-    import subprocess as _sp
     import json as _json
     body = data if isinstance(data, str) else _json.dumps(data or {}, ensure_ascii=False)
     argv = ['node', _RAP_CLI, api, body]
@@ -269,14 +275,15 @@ def generate_x_rap_param(api, data, app_id=None, fingerprint_hex: str = ''):
     if fingerprint_hex:
         argv.append(fingerprint_hex)
     try:
-        r = _sp.run(
+        r = subprocess.run(
             argv, capture_output=True, text=True,
             cwd=os.path.dirname(_RAP_CLI), timeout=30,
+            creationflags=_NO_WINDOW, stdin=subprocess.DEVNULL,
         )
         out = (r.stdout or '').strip()
         if out and out.startswith('ByQ'):
             return out
-    except (OSError, _sp.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         pass
     raise RuntimeError('JS x-rap-param 生成失败')
 

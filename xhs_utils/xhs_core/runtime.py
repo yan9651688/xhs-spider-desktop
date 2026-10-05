@@ -13,6 +13,12 @@ _JS_DIR = os.path.join(os.path.dirname(__file__), 'js')
 _WEBSECTIGA_CLI = os.path.join(_JS_DIR, 'websectiga_cli.js')
 _WEBSECTIGA_RE = re.compile(r'^[0-9a-f]{64}$', re.I)
 
+# Windows 上打包为 GUI 程序（PyInstaller --windowed）后自身没有控制台，
+# 此时创建子进程若不指定 CREATE_NO_WINDOW，系统会为每个子进程新分配一个
+# 控制台窗口，表现为命令行窗口不停闪烁。非 Windows 平台取不到该常量、
+# 回退为 0（即 subprocess 默认值），因此可以无条件传入。
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 
 def run_node_json(
     argv: list[str],
@@ -31,6 +37,9 @@ def run_node_json(
             text=True,
             cwd=os.path.dirname(argv[1]) if len(argv) > 1 else None,
             timeout=timeout,
+            creationflags=_NO_WINDOW,
+            # 传了 input 时 subprocess 会自建 stdin 管道，不能再指定。
+            stdin=None if input_text is not None else subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f'Node runtime failed to start: {exc}') from exc
