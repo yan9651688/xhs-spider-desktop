@@ -12,18 +12,23 @@ cd "$(dirname "$0")/.."
 NODE_VERSION=${NODE_VERSION:-v20.20.2}
 CACHE_DIR=${NODE_CACHE_DIR:-.node_cache}
 
-case "$(uname -m)" in
+# NODE_ARCH 可由调用方（build_mac.sh 交叉构建时）覆盖，否则跟随本机。
+case "${NODE_ARCH:-$(uname -m)}" in
   arm64) NODE_ARCH=arm64 ;;
   x86_64) NODE_ARCH=x64 ;;
-  *) echo "不支持的架构: $(uname -m)"; exit 1 ;;
+  *) echo "不支持的架构: ${NODE_ARCH:-$(uname -m)}"; exit 1 ;;
 esac
 
 rm -rf node_dist
 mkdir -p node_dist/bin
 
+arch_of() { lipo -archs "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"; }
+
 copy_local_node() {
   local bin root
   bin=$(command -v node) || return 1
+  # 交叉构建时本机 node 架构不对，直接放弃，交给官方包下载
+  arch_of "$bin" "$([ "$NODE_ARCH" = "x64" ] && echo x86_64 || echo arm64)" || return 1
   root=$(cd "$(dirname "$bin")/.." && pwd)
   cp "$bin" node_dist/bin/node
   # 官方包里 node 自带全部依赖；Homebrew 那种把同级 dylib 一并带上也仍会因绝对路径失败，

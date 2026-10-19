@@ -7,6 +7,7 @@ node_modules/
 build/
 develop-eggs/
 dist/
+dist-*/
 downloads/
 eggs/
 .eggs/
@@ -25,6 +26,7 @@ local_settings.py
 db.sqlite3
 __pypackages__/
 .venv
+.venv-x64
 env/
 venv/
 ENV/

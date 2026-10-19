@@ -40,6 +40,13 @@ npm install
 # macOS 出包（app + dmg）
 BUNDLE_NODE=1 desktop/build_mac.sh
 
+# macOS Intel (x86_64) 包：在 Apple Silicon 上用 Rosetta 交叉构建，无需 Intel 机器
+# 一次性准备 x86_64 解释器（本机无 python3.12 时可用 uv/python-build-standalone 的 x86_64 构建）
+arch -x86_64 /path/to/x86_64/python3.12 -m venv .venv-x64
+arch -x86_64 .venv-x64/bin/python -m pip install -r desktop/requirements.txt
+PY=.venv-x64/bin/python TARGET_ARCH=x86_64 BUNDLE_NODE=1 desktop/build_mac.sh
+# 产物：dist/XhsSpider-x86_64.dmg（与 arm64 包可共存，文件名自动区分）
+
 # Windows 出包（在本机执行，或用 GitHub Actions 云构建）
 desktop/build_windows.bat
 ```
