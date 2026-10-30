@@ -7,8 +7,23 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import requests
+from loguru import logger
+
+# 改写是可选增强，不该拖垮采集：单次请求 25 秒封顶（原来 60 秒，
+# 网关无响应时每篇笔记要空等两分钟）。
+DEFAULT_TIMEOUT = 25
+# 网络类失败（连接被重置/超时）多半是瞬时的，重试一次；HTTP 语义错误不重试。
+RETRY_TIMES = 1
+RETRY_BACKOFF = 0.8
+
+_RETRYABLE = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
 
 TITLE_PROMPT_PRESET = (
     '你是小红书爆款标题写手。基于给出的原标题，改写一个全新的小红书风格标题：'
@@ -82,10 +97,35 @@ class AIClient:
         self.model = (model or 'deepseek-v4.1-flash').strip()
         self.title_prompt = (title_prompt or '').strip() or TITLE_PROMPT_PRESET
         self.content_prompt = (content_prompt or '').strip() or CONTENT_PROMPT_PRESET
+        # 独立 Session：复用连接，且与采集侧的 curl_cffi 互不干扰
+        self._session = requests.Session()
 
-    def _call(self, instructions: str, user_input: str, timeout: int = 60) -> str:
+    def close(self) -> None:
+        try:
+            self._session.close()
+        except Exception as exc:
+            logger.debug(f'关闭 AI Session 失败：{exc}')
+
+    def _call(self, instructions: str, user_input: str,
+              timeout: int = DEFAULT_TIMEOUT) -> str:
         if not self.api_key:
             raise AIError('未配置 API Key')
+        attempt = 0
+        while True:
+            try:
+                return self._dispatch(instructions, user_input, timeout)
+            except (_EndpointUnsupported, AIError):
+                raise
+            except _RETRYABLE as exc:
+                if attempt >= RETRY_TIMES:
+                    raise AIError(
+                        f'AI 接口网络异常（已重试 {RETRY_TIMES} 次）：'
+                        f'{type(exc).__name__}: {str(exc)[:120]}'
+                    ) from exc
+                attempt += 1
+                time.sleep(RETRY_BACKOFF * attempt)
+
+    def _dispatch(self, instructions: str, user_input: str, timeout: int) -> str:
         try:
             return self._call_responses(instructions, user_input, timeout)
         except _EndpointUnsupported:
@@ -107,7 +147,7 @@ class AIClient:
             )
 
     def _call_responses(self, instructions: str, user_input: str, timeout: int) -> str:
-        resp = requests.post(
+        resp = self._session.post(
             f'{self.base}/responses',
             headers=self._headers(),
             json={
@@ -137,7 +177,7 @@ class AIClient:
 
     def _call_chat(self, instructions: str, user_input: str, timeout: int) -> str:
         """网关不支持 /responses 时自动降级 chat/completions。"""
-        resp = requests.post(
+        resp = self._session.post(
             f'{self.base}/chat/completions',
             headers=self._headers(),
             json={
@@ -166,7 +206,7 @@ class AIClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise AIError('AI 接口响应缺少正文') from exc
 
-    def rewrite_title(self, title: str, timeout: int = 60) -> str:
+    def rewrite_title(self, title: str, timeout: int = DEFAULT_TIMEOUT) -> str:
         """改写标题；返回改写文本，失败抛 AIError。"""
         text = self._call(self.title_prompt, f'原标题：{title}', timeout)
         data = parse_rewrite_json(text)
@@ -175,7 +215,7 @@ class AIClient:
             raise AIError('AI 标题输出为空')
         return result
 
-    def rewrite_content(self, content: str, timeout: int = 60) -> str:
+    def rewrite_content(self, content: str, timeout: int = DEFAULT_TIMEOUT) -> str:
         """改写正文；返回改写文本，失败抛 AIError。"""
         text = self._call(self.content_prompt, f'原文案：{content}', timeout)
         data = parse_rewrite_json(text)
@@ -186,5 +226,5 @@ class AIClient:
 
     def test(self) -> str:
         """连通性测试：跑一次标题改写，返回模型输出摘要。"""
-        sample = self.rewrite_title('手工轻奢黄金小众耳环', timeout=30)
+        sample = self.rewrite_title('手工轻奢黄金小众耳环', timeout=20)
         return sample[:30]

@@ -316,6 +316,11 @@ class _AiTestWorker(QThread):
             self.ok.emit(self.client.test())
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            try:
+                self.client.close()
+            except Exception:
+                pass
 
 
 class _AccountProbeWorker(QThread):
@@ -463,7 +468,7 @@ class MainWindow(QMainWindow):
         self._log_sink_id = logger.add(
             self._log_bridge.emit_message,
             level='INFO',
-            format='{time:HH:mm:ss} | {level: <7} | {message}',
+            format='{level: <7} | {message}',
         )
 
         self._check_timer = QTimer(self)
@@ -2517,7 +2522,9 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def append_log(self, text: str):
-        self.log_view.appendPlainText(text)
+        # 时间戳统一在这里打：loguru 的 sink 与采集线程 emit.log 都汇到这一条路，
+        # 排查"接口从第几秒开始超时"这类问题才有据可查。
+        self.log_view.appendPlainText(f'{time.strftime("%H:%M:%S")} | {text}')
 
     def closeEvent(self, event):
         if self.collect_worker is not None and self.collect_worker.isRunning():

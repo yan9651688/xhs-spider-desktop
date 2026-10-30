@@ -1510,6 +1510,236 @@ def test_ai_parse():
     check('解析失败返回空', data == {})
 
 
+# ---------- 5b. AI 客户端：超时、重试、Session ----------
+
+def test_ai_client_retry():
+    import desktop.ai_client as ai_mod
+
+    class _Resp:
+        def __init__(self, payload, status=200):
+            self._payload = payload
+            self.status_code = status
+            self.text = ''
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    class _FakeSession:
+        """前 fail_calls 次调用抛 exc，之后返回 200。"""
+
+        def __init__(self, exc=None, fail_calls=0, status=200):
+            self.exc, self.fail_calls, self.status = exc, fail_calls, status
+
+        def post(self, url, **kwargs):
+            calls.append(url)
+            if self.exc is not None and len(calls) <= self.fail_calls:
+                raise self.exc
+            return _Resp({'output_text': '改写后的标题'}, self.status)
+
+        def close(self):
+            pass
+
+    orig_backoff = ai_mod.RETRY_BACKOFF
+    ai_mod.RETRY_BACKOFF = 0        # 自检不真等
+    try:
+        client = ai_mod.AIClient('https://api.example.com/v1', 'k', 'm')
+        check('AI 默认超时已收紧到 25 秒', ai_mod.DEFAULT_TIMEOUT == 25)
+
+        # 1) 读超时（网关接了不回）重试一次后成功
+        client._session = _FakeSession(ai_mod.requests.exceptions.ReadTimeout('read timeout'),
+                                       fail_calls=1)
+        result = client.rewrite_title('原标题')
+        check('AI 读超时自动重试成功', result == '改写后的标题' and len(calls) == 2, str(calls))
+
+        # 2) 连接被重置且一直失败：重试一次后抛 AIError
+        calls.clear()
+        client._session = _FakeSession(ai_mod.requests.exceptions.ConnectionError('reset'),
+                                       fail_calls=99)
+        try:
+            client.rewrite_content('原文案')
+            raised = ''
+        except ai_mod.AIError as exc:
+            raised = str(exc)
+        check('AI 网络异常重试后报错并说明已重试',
+              '已重试' in raised and len(calls) == 2, raised)
+
+        # 3) HTTP 语义错误不重试（重试也修不好，白等）
+        calls.clear()
+        client._session = _FakeSession(exc=None, fail_calls=0, status=401)
+        try:
+            client.rewrite_title('原标题')
+            raised = ''
+        except ai_mod.AIError as exc:
+            raised = str(exc)
+        check('AI 鉴权失败不重试', 'API Key 无效' in raised and len(calls) == 1, raised)
+
+        client.close()
+    finally:
+        ai_mod.RETRY_BACKOFF = orig_backoff
+
+
+# ---------- 5c. AI 熔断：网关挂了不该拖垮采集 ----------
+
+def test_ai_circuit_breaker():
+    import tempfile
+
+    import apis.xhs_pc_apis as api_mod
+    import desktop.ai_client as ai_mod
+    import desktop.spider_service as svc
+    import xhs_utils.data_util as du
+    import xhs_utils.xhs_pc as pc_mod
+    from desktop.spider_service import TaskSpec
+
+    class _Emit:
+        def __init__(self):
+            self.logs = []
+            self.steps = []
+            self.notes = []
+
+        def log(self, text):
+            self.logs.append(str(text))
+
+        def note(self, note_info):
+            self.notes.append(note_info)
+
+        def progress(self, done, total, stage):
+            self.steps.append((done, total, stage))
+
+    class _StubApi:
+        def bootstrap(self):
+            return self
+
+    class _StubAI:
+        def __init__(self, *args, **kwargs):
+            self.model = 'stub'
+            self.calls = 0
+            self.fail_calls = 99        # 前 N 次调用失败
+            self.closed = False
+
+        def _bump(self):
+            self.calls += 1
+            if self.calls <= self.fail_calls:
+                raise ai_mod.AIError('AI 接口网络异常（已重试 1 次）：ReadTimeout')
+
+        def rewrite_title(self, title):
+            self._bump()
+            return 'AI标题'
+
+        def rewrite_content(self, desc):
+            self._bump()
+            return 'AI文案'
+
+        def close(self):
+            self.closed = True
+
+    orig = (svc._spider_note, pc_mod.XHSPcAuth, api_mod.XHS_Apis,
+            ai_mod.AIClient, du.download_note, du.save_to_xlsx)
+    stub_ai = _StubAI()
+    svc._spider_note = lambda api, url, nw=False: (True, 'ok', {
+        'note_id': 'n1', 'title': '原题', 'desc': '原文', 'note_type': '图文',
+        'image_list': [{'url': 'http://x/1.jpg'}], 'url': url,
+    })
+    pc_mod.XHSPcAuth = type('A', (), {'from_cookie': staticmethod(lambda c: object())})
+    api_mod.XHS_Apis = lambda auth: _StubApi()
+    ai_mod.AIClient = lambda *args, **kwargs: stub_ai
+    du.download_note = lambda *args, **kwargs: None
+    du.save_to_xlsx = lambda *args, **kwargs: None
+    try:
+        spec = TaskSpec(mode='urls', note_urls=[f'https://a/{i}' for i in range(1, 7)],
+                        output_dir=tempfile.mkdtemp(), task_name='ai_breaker',
+                        save_images=True, save_videos=True, save_excel=False,
+                        zip_export=False, delay_seconds=0, ai_cfg={'key': 'k'})
+        emit = _Emit()
+        summary = svc.run_collection([{'cookie': 'x'}], spec, lambda: False, emit)
+
+        check('熔断：网关全挂时只试到阈值就停',
+              stub_ai.calls == svc.AI_MAX_CONSECUTIVE, str(stub_ai.calls))
+        check('熔断：日志说明已关闭 AI 改写',
+              any('已关闭 AI 改写' in m for m in emit.logs))
+        check('熔断：已关闭 AI 客户端', stub_ai.closed)
+        check('熔断：未改写的笔记保留原文且照常采集',
+              summary['got'] == 6 and len(emit.notes) == 6
+              and all(not n.get('title_ai') and not n.get('desc_ai')
+                      for n in emit.notes),
+              f"got={summary['got']} notes={len(emit.notes)}")
+
+        # 偶发抖动不该熔断：失败一次就成功，计数必须清零
+        stub_ai2 = _StubAI()
+        stub_ai2.fail_calls = 1
+        ai_mod.AIClient = lambda *args, **kwargs: stub_ai2
+        emit2 = _Emit()
+        svc.run_collection([{'cookie': 'x'}], spec, lambda: False, emit2)
+        check('熔断：偶发失败不误伤（成功即清零）',
+              stub_ai2.calls == 12 and not any('已关闭 AI 改写' in m for m in emit2.logs),
+              f'calls={stub_ai2.calls}')
+    finally:
+        (svc._spider_note, pc_mod.XHSPcAuth, api_mod.XHS_Apis,
+         ai_mod.AIClient, du.download_note, du.save_to_xlsx) = orig
+
+
+# ---------- 5d. 图片下载重试（必须早于 test_xiaolvsu_zip：后者会永久替换 _download_as_jpg） ----------
+
+def test_image_download_retry():
+    import io
+    import tempfile
+
+    import desktop.xhs_export as export_mod
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new('RGB', (6, 6), (10, 120, 200)).save(buf, 'PNG')
+    png = buf.getvalue()
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, data):
+            self.raw = io.BytesIO(data)
+
+        def raise_for_status(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    calls = []
+
+    def flaky_get(url, *args, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。')
+        return _Resp(png)
+
+    orig_get, orig_wait = export_mod.requests.get, export_mod.IMAGE_RETRY_WAIT
+    export_mod.requests.get = flaky_get
+    export_mod.IMAGE_RETRY_WAIT = 0     # 自检不真等
+    try:
+        tmp = tempfile.mkdtemp()
+        ok = export_mod._download_as_jpg('https://ci.xiaohongshu.com/x', tmp, 1)
+        check('图片下载：被重置后重试成功', ok and len(calls) == 2, str(calls))
+        check('图片下载：重试后正常落盘',
+              os.path.exists(os.path.join(tmp, '1.jpg')))
+
+        calls.clear()
+
+        def dead_get(url, *args, **kwargs):
+            calls.append(url)
+            raise ConnectionResetError(10054, '远程主机强迫关闭了一个现有的连接。')
+
+        export_mod.requests.get = dead_get
+        ok2 = export_mod._download_as_jpg('https://ci.xiaohongshu.com/y', tmp, 2)
+        check('图片下载：重试仍失败则返回 False 且不再重试',
+              ok2 is False and len(calls) == export_mod.IMAGE_ATTEMPTS, str(calls))
+    finally:
+        export_mod.requests.get = orig_get
+        export_mod.IMAGE_RETRY_WAIT = orig_wait
+
+
 # ---------- 6b. 评论采集 ----------
 
 def test_comment_collection():
@@ -1836,8 +2066,11 @@ if __name__ == '__main__':
     test_xhs_login_thread_shutdown()
     test_qrcode_login_cancel()
     test_no_watermark_download()
+    test_image_download_retry()      # 必须在 test_xiaolvsu_zip 之前（后者替换了下载函数）
     test_xiaolvsu_zip()
     test_ai_parse()
+    test_ai_client_retry()
+    test_ai_circuit_breaker()
     test_comment_collection()
     test_collect_urls()
     test_user_search()

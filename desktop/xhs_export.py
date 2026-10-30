@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import time
 import zipfile
 
 import requests
@@ -19,6 +20,9 @@ from PIL import Image
 from desktop.spider_service import sanitize_name
 
 IMAGE_TIMEOUT = 20
+# 图床偶发连接被重置（实测 ci.xiaohongshu.com 会抖），失败后重试一次
+IMAGE_ATTEMPTS = 2
+IMAGE_RETRY_WAIT = 0.8
 
 
 def _original_image_url(url: str) -> str:
@@ -39,18 +43,25 @@ def _original_image_url(url: str) -> str:
 
 def _download_as_jpg(url: str, dest_dir: str, index: int) -> bool:
     """下载图片并规范化保存为 {index}.jpg（webp/png 统一转 JPEG，保证 xiao 端扩展名过滤通过）。"""
-    try:
-        resp = requests.get(url, timeout=IMAGE_TIMEOUT, stream=True)
-        resp.raise_for_status()
-        data = resp.raw.read()
-        image = Image.open(io.BytesIO(data))
-        if image.mode not in ('RGB', 'L'):
-            image = image.convert('RGB')
-        image.save(os.path.join(dest_dir, f'{index}.jpg'), 'JPEG', quality=90)
-        return True
-    except Exception as exc:
-        logger.warning(f'图片下载失败 {url[:80]}: {exc}')
-        return False
+    last_exc = None
+    for attempt in range(1, IMAGE_ATTEMPTS + 1):
+        try:
+            # 用 with 收尾：失败时也要把连接还掉，别把断掉的连接留在池子里
+            with requests.get(url, timeout=IMAGE_TIMEOUT, stream=True) as resp:
+                resp.raise_for_status()
+                data = resp.raw.read()
+            image = Image.open(io.BytesIO(data))
+            if image.mode not in ('RGB', 'L'):
+                image = image.convert('RGB')
+            image.save(os.path.join(dest_dir, f'{index}.jpg'), 'JPEG', quality=90)
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if attempt < IMAGE_ATTEMPTS:
+                time.sleep(IMAGE_RETRY_WAIT)
+    logger.warning(
+        f'图片下载失败（已重试 {IMAGE_ATTEMPTS - 1} 次）{url[:80]}: {last_exc}')
+    return False
 
 
 def export_note_folder(note: dict, base_dir: str, should_stop=None,

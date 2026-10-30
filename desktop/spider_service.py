@@ -128,6 +128,10 @@ RISK_KEYWORDS = ('461', '-629', '频繁', '风控', '验证码', '异常流量')
 RISK_COOLDOWN_SECONDS = 60
 RISK_MAX_CONSECUTIVE = 3
 
+# AI 改写是可选增强：网关不可用时若不熔断，每篇笔记会白等两次超时，
+# 实测 11 篇的任务里 96% 的时间都耗在这上面。
+AI_MAX_CONSECUTIVE = 3
+
 
 def _throttle(delay: float, should_stop) -> None:
     """带随机抖动的限速等待，0.2s 粒度响应停止请求。"""
@@ -420,6 +424,7 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
     note_list = []
     skipped = 0
     consecutive_risk = 0
+    ai_fail_streak = 0
     for index, url in enumerate(urls, start=1):
         if should_stop():
             emit.log('任务已被用户停止，开始保存已采集的结果…')
@@ -444,19 +449,36 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
                         note_info.get('title') or '')
                     title_done = True
                 except Exception as exc:
+                    ai_fail_streak += 1
                     emit.log(f'AI 标题改写失败（{index}/{total}），保留原文：{exc}')
-                try:
-                    note_info['desc_ai'] = ai_client.rewrite_content(
-                        note_info.get('desc') or '')
-                    content_done = True
-                except Exception as exc:
-                    emit.log(f'AI 文案改写失败（{index}/{total}），保留原文：{exc}')
+                # 标题已把阈值打满就不再发起文案调用，省下一次白等
+                if ai_client is not None and ai_fail_streak < AI_MAX_CONSECUTIVE:
+                    try:
+                        note_info['desc_ai'] = ai_client.rewrite_content(
+                            note_info.get('desc') or '')
+                        content_done = True
+                    except Exception as exc:
+                        ai_fail_streak += 1
+                        emit.log(f'AI 文案改写失败（{index}/{total}），保留原文：{exc}')
                 if title_done or content_done:
+                    # 只要有一次成功就说明网关还活着，失败计数清零
+                    ai_fail_streak = 0
                     emit.log(
                         f"AI 改写完成（{index}/{total}，"
                         f"{'标题' if title_done else ''}{'+' if title_done and content_done else ''}"
                         f"{'文案' if content_done else ''}）：{str(note_info.get('title_ai') or note_info.get('title'))[:24]}"
                     )
+                if ai_client is not None and ai_fail_streak >= AI_MAX_CONSECUTIVE:
+                    emit.log(
+                        f'AI 网关连续 {ai_fail_streak} 次调用失败，本次任务已关闭 AI 改写，'
+                        f'剩余 {total - index} 篇保留原文。'
+                        '请检查本机网络与 AI 网关渠道后重新采集（抓取结果不受影响）'
+                    )
+                    try:
+                        ai_client.close()
+                    except Exception as exc:
+                        logger.debug(f'关闭 AI 客户端失败：{exc}')
+                    ai_client = None
             note_list.append(note_info)
             emit.note(note_info)
         else:
@@ -482,6 +504,14 @@ def run_collection(cookies: list, spec: TaskSpec, should_stop, emit):
             _throttle(spec.delay_seconds, should_stop)
     if skipped:
         emit.log(f'已按保存选项跳过 {skipped} 篇笔记（未勾选对应类型）')
+
+    # 抓取阶段结束，AI 连接池先还掉，别拖到导出阶段
+    if ai_client is not None:
+        try:
+            ai_client.close()
+        except Exception as exc:
+            logger.debug(f'关闭 AI 客户端失败：{exc}')
+        ai_client = None
 
     # 停止 = 停止抓取新笔记；已抓到的结果必须完整导出，导出阶段不再响应停止
     never_stop = lambda: False  # noqa: E731
